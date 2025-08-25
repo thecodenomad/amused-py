@@ -117,6 +117,9 @@ class MuseStreamClient:
         self.data_dir = data_dir
         self.verbose = verbose
 
+        # Store original device model for auto-detection
+        self.device_model = device_model
+
         # Set up device configuration
         self.device_config = self._get_device_config(device_model)
 
@@ -141,6 +144,9 @@ class MuseStreamClient:
         # Device info
         self.device_info = {}
 
+        # Auto-detection state
+        self.auto_detected_model = None
+
         # User callbacks
         self.user_callbacks = {
             'eeg': None,
@@ -157,7 +163,8 @@ class MuseStreamClient:
         elif device_model == "gen3":
             return MuseDeviceConfig.get_gen3_config()
         elif device_model == "auto":
-            # Auto-detection - start with Gen 3, can be changed later
+            # Auto-detection will be performed later during connection
+            # Start with Gen3 config as fallback
             return MuseDeviceConfig.get_gen3_config()
         elif isinstance(device_model, dict):
             # Custom configuration provided
@@ -167,7 +174,72 @@ class MuseStreamClient:
 
     def get_device_model_name(self) -> str:
         """Get the current device model name"""
+        if self.auto_detected_model:
+            return f"{self.device_config.get('name', 'Unknown')} (auto-detected: {self.auto_detected_model})"
         return self.device_config.get('name', 'Unknown')
+
+    async def _auto_detect_device_model(self, client: BleakClient) -> str:
+        """
+        Auto-detect the Muse device model based on device characteristics
+
+        Detection methods:
+        1. Firmware version analysis
+        2. Command response patterns
+        3. Packet structure analysis (if available)
+        """
+        self.log("🔍 Auto-detecting device model...")
+
+        # Method 1: Try firmware version detection
+        try:
+            # Get device info using both Gen1 and Gen3 commands
+            control_uuid = self.device_config['control_char_uuid']
+
+            # Try Gen1 version command first
+            gen1_cmd = MuseDeviceConfig.get_gen1_config()['commands']['v1']
+            await client.write_gatt_char(control_uuid, gen1_cmd, response=False)
+            await asyncio.sleep(0.2)
+
+            # Check if we got a response that indicates Gen1
+            if 'fw' in self.device_info:
+                fw_version = self.device_info['fw']
+                self.log(f"📡 Firmware detected: {fw_version}")
+
+                # Gen1 firmware versions are typically lower numbers
+                # Gen3/Athena firmware versions are higher (e.g., 1.x.x for Gen1, 2.x.x+ for Gen3)
+                if fw_version.startswith('1.') or fw_version.startswith('0.'):
+                    self.log("✅ Detected: Muse S Gen 1 (based on firmware)")
+                    return 'gen1'
+                elif fw_version.startswith('2.') or fw_version.startswith('3.'):
+                    self.log("✅ Detected: Muse S Gen 3 (based on firmware)")
+                    return 'gen3'
+
+        except Exception as e:
+            self.log(f"⚠️ Firmware detection failed: {e}")
+
+        # Method 2: Try command response patterns
+        try:
+            # Test with a Gen1-specific command pattern
+            gen1_status = MuseDeviceConfig.get_gen1_config()['commands']['s']
+            await client.write_gatt_char(control_uuid, gen1_status, response=False)
+            await asyncio.sleep(0.1)
+
+            # If we get here without errors, and have device info, check patterns
+            if self.device_info:
+                # Gen1 devices often have different response patterns
+                if 'bp' in self.device_info:  # Battery percentage
+                    bp = self.device_info['bp']
+                    if isinstance(bp, str) and bp.isdigit():
+                        bp_val = int(bp)
+                        if bp_val > 0:  # Valid battery reading
+                            self.log("✅ Detected: Muse S Gen 1 (based on command response)")
+                            return 'gen1'
+
+        except Exception as e:
+            self.log(f"⚠️ Command pattern detection failed: {e}")
+
+        # Method 3: Default to Gen3 if detection inconclusive
+        self.log("⚠️ Could not conclusively detect model, defaulting to Gen 3")
+        return 'gen3'
 
         # We'll add cleanup later when we have the method defined
 
@@ -313,6 +385,14 @@ class MuseStreamClient:
 
                 # Enable control notifications
                 await client.start_notify(self.device_config['control_char_uuid'], self.handle_control_notification)
+
+                # Auto-detect device model if requested
+                if self.device_model == "auto":
+                    detected_model = await self._auto_detect_device_model(client)
+                    if detected_model != 'gen3':  # Only switch if not Gen3 (which is our default)
+                        self.log(f"🔄 Switching to {detected_model} configuration")
+                        self.device_config = self._get_device_config(detected_model)
+                        self.auto_detected_model = detected_model
 
                 # Get device info - try Gen 1 first, then Gen 3
                 version_cmd = self.device_config['commands'].get('v1', self.device_config['commands']['v6'])
