@@ -111,7 +111,7 @@ class MuseStreamClient:
                  decode_realtime: bool = True,
                  data_dir: str = "muse_data",
                  verbose: bool = True,
-                 device_model: str = "auto"):  # 'auto', 'gen1', 'gen3', or custom config dict
+                 device_model: str = "gen1"):  # 'gen1', 'gen3', 'auto', or custom config dict
         """
         Initialize streaming client
 
@@ -173,8 +173,8 @@ class MuseStreamClient:
             return MuseDeviceConfig.get_gen3_config()
         elif device_model == "auto":
             # Auto-detection will be performed later during connection
-            # Start with Gen3 config as fallback
-            return MuseDeviceConfig.get_gen3_config()
+            # Start with Gen1 config as fallback (more common for existing users)
+            return MuseDeviceConfig.get_gen1_config()
         elif isinstance(device_model, dict):
             # Custom configuration provided
             return device_model
@@ -192,15 +192,37 @@ class MuseStreamClient:
         Auto-detect the Muse device model based on device characteristics
 
         Detection methods:
-        1. Firmware version analysis
-        2. Command response patterns
-        3. Packet structure analysis (if available)
+        1. Device name pattern analysis (most reliable)
+        2. Firmware version analysis
+        3. Command response patterns
         """
         self.log("🔍 Auto-detecting device model...")
 
-        # Method 1: Try firmware version detection
+        # Method 1: Device name pattern analysis (most reliable)
         try:
-            # Get device info using both Gen1 and Gen3 commands
+            # Get device name from the client
+            device_name = getattr(client, '_device', None)
+            if device_name:
+                device_name = getattr(device_name, 'name', None) or str(device_name)
+            else:
+                device_name = str(client)
+
+            self.log(f"📡 Device name: {device_name}")
+
+            # Gen1 devices typically have names like "MuseS-XXXX"
+            # Gen3 devices typically have names like "Muse-XXXX" or different patterns
+            if device_name and 'MuseS-' in device_name:
+                self.log("✅ Detected: Muse S Gen 1 (based on device name)")
+                return 'gen1'
+            elif device_name and 'Muse-' in device_name and 'MuseS-' not in device_name:
+                self.log("✅ Detected: Muse S Gen 3 (based on device name)")
+                return 'gen3'
+
+        except Exception as e:
+            self.log(f"⚠️ Device name detection failed: {e}")
+
+        # Method 2: Try firmware version detection
+        try:
             control_uuid = self.device_config['control_char_uuid']
 
             # Try Gen1 version command first
@@ -225,7 +247,7 @@ class MuseStreamClient:
         except Exception as e:
             self.log(f"⚠️ Firmware detection failed: {e}")
 
-        # Method 2: Try command response patterns
+        # Method 3: Try command response patterns
         try:
             # Test with a Gen1-specific command pattern
             gen1_status = MuseDeviceConfig.get_gen1_config()['commands']['s']
@@ -246,9 +268,9 @@ class MuseStreamClient:
         except Exception as e:
             self.log(f"⚠️ Command pattern detection failed: {e}")
 
-        # Method 3: Default to Gen3 if detection inconclusive
-        self.log("⚠️ Could not conclusively detect model, defaulting to Gen 3")
-        return 'gen3'
+        # Method 4: Default to Gen1 if detection inconclusive (more common for existing users)
+        self.log("⚠️ Could not conclusively detect model, defaulting to Gen 1")
+        return 'gen1'
 
         # We'll add cleanup later when we have the method defined
 
