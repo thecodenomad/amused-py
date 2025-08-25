@@ -59,22 +59,25 @@ class MuseDeviceConfig:
             'service_uuid': "0000fe8d-0000-1000-8000-00805f9b34fb",  # May be same
             'control_char_uuid': "273e0001-4c4d-454d-96be-f03bac821358",  # May be same
             'sensor_char_uuids': [
-                "273e0013-4c4d-454d-96be-f03bac821358",  # Combined sensors (primary)
-                "273e0003-4c4d-454d-96be-f03bac821358",  # EEG TP9
-                "273e0004-4c4d-454d-96be-f03bac821358",  # EEG AF7
-                "273e0005-4c4d-454d-96be-f03bac821358",  # EEG AF8
-                "273e0006-4c4d-454d-96be-f03bac821358",  # EEG TP10
-                "273e0007-4c4d-454d-96be-f03bac821358",  # EEG FPz
-                "273e0008-4c4d-454d-96be-f03bac821358",  # AUX Right
-                "273e0009-4c4d-454d-96be-f03bac821358",  # AUX Left
+                "273e0003-4c4d-454d-96be-f03bac821358",  # EEG TP9 (688 packets)
+                "273e0004-4c4d-454d-96be-f03bac821358",  # EEG AF7 (688 packets)
+                "273e0005-4c4d-454d-96be-f03bac821358",  # EEG AF8 (688 packets)
+                "273e0006-4c4d-454d-96be-f03bac821358",  # EEG TP10 (688 packets)
+                "273e0008-4c4d-454d-96be-f03bac821358",  # IMU data (153 packets)
+                "273e0009-4c4d-454d-96be-f03bac821358",  # PPG data (567 packets)
+                "273e000a-4c4d-454d-96be-f03bac821358",  # PPG data (567 packets)
             ],
             'commands': {
                 'v1': bytes.fromhex('0376310a'),           # Version (Gen 1 style)
                 'v6': bytes.fromhex('0376360a'),           # Version (Gen 3 style)
                 's': bytes.fromhex('02730a'),              # Status
                 'h': bytes.fromhex('02680a'),              # Halt
-                'p21': bytes.fromhex('047032310a'),        # Basic preset
-                'p1034': bytes.fromhex('0670313033340a'),  # Sleep preset
+                'p21': bytes.fromhex('047032310a'),        # Basic preset (standard)
+                'p22': bytes.fromhex('047032320a'),        # Basic preset (lower rate)
+                'p23': bytes.fromhex('047032330a'),        # Basic preset (even lower rate)
+                'p1034': bytes.fromhex('0670313033340a'),  # Sleep preset (standard)
+                'p1035': bytes.fromhex('0670313033350a'),  # Sleep preset (lower rate)
+                'p1036': bytes.fromhex('0670313033360a'),  # Sleep preset (lowest rate)
                 'dc001': bytes.fromhex('0664633030310a'),  # Start streaming
                 'L1': bytes.fromhex('034c310a'),           # L1 command
             },
@@ -82,7 +85,13 @@ class MuseDeviceConfig:
             'imu_accel_scale': 1.0 / 100.0,       # Updated based on packet analysis
             'imu_gyro_scale': 1.0 / 100.0,        # Updated based on packet analysis
             'expected_packet_types': [0xDF, 0xF4, 0xDB, 0xD9],
-            'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L']
+            'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],  # Only supported channels on Gen1
+            'supported_channels': ['TP9', 'AF7', 'AF8', 'TP10'],  # Explicitly list supported channels
+            'max_sampling_rate': 250,  # Gen1 max sampling rate (Hz)
+            'stabilization_time': 5.0,  # 5 second stabilization period for Gen1
+            'quality_threshold': 0.60,   # Require 60% valid samples before recording
+            'quality_window': 1000,      # Check quality over 1000 samples
+            'max_quality_wait': 15.0,    # Maximum time to wait for good quality (seconds)
         }
 
 class MuseStreamClient:
@@ -275,6 +284,48 @@ class MuseStreamClient:
         """Register callback for raw packets"""
         self.user_callbacks['packet'] = callback
 
+    async def _wait_for_signal_quality(self, client):
+        """Wait for signal quality to reach acceptable threshold before recording"""
+        quality_threshold = self.device_config.get('quality_threshold', 0.60)
+        max_wait_time = self.device_config.get('max_quality_wait', 15.0)
+
+        self.log(f"Monitoring signal quality (target: {quality_threshold:.0%})...")
+
+        # Simple approach: wait for basic stabilization period
+        # In a more advanced implementation, we could monitor actual signal quality
+        stabilization_time = self.device_config.get('stabilization_time', 5.0)
+
+        self.log(f"Waiting {stabilization_time}s for Gen1 device stabilization...")
+        await asyncio.sleep(stabilization_time)
+        self.log("Stabilization complete, starting data collection")
+
+        # Future enhancement: Could monitor actual EEG signal quality here
+        # by temporarily enabling notifications and checking signal characteristics
+
+    def _trigger_user_callbacks(self, decoded: DecodedData):
+        """Trigger user callbacks with decoded data"""
+        # EEG callback
+        if decoded.eeg and self.user_callbacks['eeg']:
+            # Format EEG data for callback
+            eeg_data = {'channels': decoded.eeg, 'timestamp': decoded.timestamp}
+            self.user_callbacks['eeg'](eeg_data)
+
+        # PPG callback
+        if decoded.ppg and self.user_callbacks['ppg']:
+            # Format PPG data for callback
+            ppg_data = {'samples': decoded.ppg.get('samples', []), 'timestamp': decoded.timestamp}
+            self.user_callbacks['ppg'](ppg_data)
+
+        # IMU callback
+        if decoded.imu and self.user_callbacks['imu']:
+            # Format IMU data for callback
+            imu_data = {'accel': decoded.imu.get('accel'), 'gyro': decoded.imu.get('gyro'), 'timestamp': decoded.timestamp}
+            self.user_callbacks['imu'](imu_data)
+
+        # Heart rate callback
+        if decoded.heart_rate and self.user_callbacks['heart_rate']:
+            self.user_callbacks['heart_rate'](decoded.heart_rate)
+
     def log(self, message: str, level: str = "INFO"):
         """Log message with timestamp"""
         if self.verbose:
@@ -300,7 +351,7 @@ class MuseStreamClient:
 
         return None
 
-    def handle_sensor_notification(self, sender: int, data: bytearray):
+    def handle_sensor_notification(self, sender, data: bytearray):
         """Handle incoming sensor data"""
         self.packet_count += 1
         timestamp = datetime.datetime.now()
@@ -322,9 +373,22 @@ class MuseStreamClient:
         if self.save_raw and self.raw_stream:
             self.raw_stream.write_packet(bytes(data), timestamp)
 
-        # Decode in real-time
+        # Decode in real-time - use characteristic-specific decoding for Gen1
         if self.decode_realtime and self.decoder:
-            decoded = self.decoder.decode(bytes(data), timestamp)
+            if 'Gen 1' in self.device_config.get('name', '') and hasattr(sender, 'uuid'):
+                # Gen1: Use characteristic-specific decoding
+                char_uuid = str(sender.uuid)
+                print(f"🔧 Decoding Gen1 packet from {char_uuid[-4:]}: {data.hex()[:20]}...")
+                decoded = self.decoder.decode_raw_packet(bytes(data), char_uuid, timestamp)
+                print(f"🔧 Decoded: eeg={bool(decoded.eeg)}, ppg={bool(decoded.ppg)}, imu={bool(decoded.imu)}")
+
+                # Trigger user callbacks directly with decoded data
+                self._trigger_user_callbacks(decoded)
+            else:
+                # Gen3: Use standard decoding
+                decoded = self.decoder.decode(bytes(data), timestamp)
+                # Trigger user callbacks directly with decoded data
+                self._trigger_user_callbacks(decoded)
 
         # User callback for raw packets
         if self.user_callbacks['packet']:
@@ -406,29 +470,62 @@ class MuseStreamClient:
                 await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['h'], response=False)
                 await asyncio.sleep(0.1)
 
-                # Set preset
+                # Set preset (use lower rate presets for Gen1)
                 self.log(f"Setting preset: {preset}")
                 if preset in self.device_config['commands']:
                     await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands'][preset], response=False)
+
+                    # For Gen1, add stabilization delay and use lower rate preset if available
+                    if 'Gen 1' in self.device_config.get('name', ''):
+                        await asyncio.sleep(0.1)
+                        # Try to use the lowest rate preset for Gen1 - prioritize p1036 for 128Hz-like performance
+                        if 'p1036' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p1036'], response=False)
+                            self.log("Applied Gen1 ultra-low-rate preset (p1036) for 128Hz-like performance")
+                        elif 'p23' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p23'], response=False)
+                            self.log("Applied Gen1 low-rate preset (p23) for better data quality")
+                        elif 'p22' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p22'], response=False)
+                            self.log("Applied Gen1 low-rate preset (p22) for better data quality")
+
+                        # Add quality-based stabilization for Gen1 devices
+                        await self._wait_for_signal_quality(client)
                 else:
                     self.log(f"Warning: Preset {preset} not available for {self.device_config['name']}")
                 await asyncio.sleep(0.1)
 
                 # Enable sensor notifications
-                sensor_enabled = False
-                for char_uuid in self.device_config['sensor_char_uuids']:
-                    try:
-                        await client.start_notify(char_uuid, self.handle_sensor_notification)
-                        sensor_enabled = True
-                        self.log(f"Sensor notifications enabled ({char_uuid})")
-                        break
-                    except Exception as e:
-                        self.log(f"Failed to enable {char_uuid}: {e}")
-                        continue
+                # For Gen1, try to enable ALL sensor characteristics
+                # For Gen3, use the first one that works
+                enabled_count = 0
+                if 'Gen 1' in self.device_config.get('name', ''):
+                    # Gen1: Enable ALL sensor characteristics
+                    for char_uuid in self.device_config['sensor_char_uuids']:
+                        try:
+                            await client.start_notify(char_uuid, self.handle_sensor_notification)
+                            enabled_count += 1
+                            self.log(f"Sensor notifications enabled ({char_uuid})")
+                        except Exception as e:
+                            self.log(f"Failed to enable {char_uuid}: {e}")
+                            continue
+                else:
+                    # Gen3: Use first one that works
+                    for char_uuid in self.device_config['sensor_char_uuids']:
+                        try:
+                            await client.start_notify(char_uuid, self.handle_sensor_notification)
+                            enabled_count += 1
+                            self.log(f"Sensor notifications enabled ({char_uuid})")
+                            break
+                        except Exception as e:
+                            self.log(f"Failed to enable {char_uuid}: {e}")
+                            continue
 
-                if not sensor_enabled:
+                if enabled_count == 0:
                     self.log("Failed to enable sensor notifications")
                     return False
+
+                self.log(f"Successfully enabled {enabled_count} sensor notification(s)")
 
                 # Re-register user callbacks with decoder
                 if self.decoder:

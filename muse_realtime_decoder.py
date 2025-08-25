@@ -197,6 +197,60 @@ class MuseRealtimeDecoder:
         # If we found PPG data, log it
         if decoded.ppg and 'samples' in decoded.ppg:
             print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples")
+
+    def decode_raw_packet(self, data: bytes, characteristic_uuid: str, timestamp=None) -> DecodedData:
+        """
+        Decode raw packet from specific characteristic UUID
+        This handles the different packet types from different characteristics
+        """
+        if timestamp is None:
+            timestamp = datetime.datetime.now()
+
+        decoded = DecodedData(timestamp=timestamp, packet_type='RAW', raw_bytes=data)
+
+        # Map characteristic UUIDs to data types based on raw capture analysis
+        if characteristic_uuid == "273e0003-4c4d-454d-96be-f03bac821358":
+            # TP9 EEG data
+            decoded.eeg = {'TP9': self._fast_unpack_eeg(data)}
+        elif characteristic_uuid == "273e0004-4c4d-454d-96be-f03bac821358":
+            # AF7 EEG data
+            decoded.eeg = {'AF7': self._fast_unpack_eeg(data)}
+        elif characteristic_uuid == "273e0005-4c4d-454d-96be-f03bac821358":
+            # AF8 EEG data
+            decoded.eeg = {'AF8': self._fast_unpack_eeg(data)}
+        elif characteristic_uuid == "273e0006-4c4d-454d-96be-f03bac821358":
+            # TP10 EEG data
+            decoded.eeg = {'TP10': self._fast_unpack_eeg(data)}
+        elif characteristic_uuid in ["273e0009-4c4d-454d-96be-f03bac821358", "273e000a-4c4d-454d-96be-f03bac821358"]:
+            # PPG data
+            ppg_samples = self._fast_unpack_ppg(data)
+            decoded.ppg = {'samples': [float(s) for s in ppg_samples]}
+        elif characteristic_uuid == "273e0008-4c4d-454d-96be-f03bac821358":
+            # IMU data
+            decoded.imu = self._decode_imu_data(data)
+
+        return decoded
+
+    def _decode_imu_data(self, data: bytes) -> Dict[str, List[float]]:
+        """Decode IMU data from Gen1 characteristic"""
+        if len(data) < 16:
+            return {}
+
+        try:
+            # Extract accelerometer and gyroscope (16-bit signed values)
+            ax = struct.unpack('>h', data[0:2])[0] / 100.0
+            ay = struct.unpack('>h', data[2:4])[0] / 100.0
+            az = struct.unpack('>h', data[4:6])[0] / 100.0
+            gx = struct.unpack('>h', data[6:8])[0] / 100.0
+            gy = struct.unpack('>h', data[8:10])[0] / 100.0
+            gz = struct.unpack('>h', data[10:12])[0] / 100.0
+
+            return {
+                'accel': [ax, ay, az],
+                'gyro': [gx, gy, gz]
+            }
+        except:
+            return {}
     
     def _decode_type_f4(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xF4 packets (IMU)"""

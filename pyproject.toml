@@ -6,12 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "amused"
 version = "1.0.2"
 authors = [
-    {name = "Adrian Tadeusz Belmans", email = "adrian.belmans@gmail.com"},
+    { name = "Adrian Tadeusz Belmans", email = "adrian.belmans@gmail.com" },
 ]
 description = "Open-source Python library for streaming data from Muse S (Athena) EEG headbands"
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.8"
+license = { text = "MIT" }
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -41,7 +41,7 @@ keywords = [
     "biosignals",
     "heart-rate",
     "meditation",
-    "sleep-monitoring"
+    "sleep-monitoring",
 ]
 dependencies = [
     "bleak>=0.21.0",
@@ -86,7 +86,7 @@ py-modules = [
     "muse_sleep_client",
     "muse_sleep_parser",
     "muse_stream_client",
-    "muse_visualizer"
+    "muse_visualizer",
 ]
 include-package-data = true
 
