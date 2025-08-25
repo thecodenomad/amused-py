@@ -143,52 +143,60 @@ class MuseRealtimeDecoder:
         return types.get(type_byte, f'UNKNOWN_{type_byte:02X}')
     
     def _decode_type_df(self, data: bytes, decoded: DecodedData):
-        """Fast decode for 0xDF packets (EEG + PPG)"""
+        """Fast decode for 0xDF packets (EEG + PPG) - Gen1 compatible"""
         decoded.eeg = {}
         decoded.ppg = {}
-        
+
         # Skip header (4 bytes)
         offset = 4
         channel_count = 0
         max_iterations = len(data)  # Prevent infinite loops
         iterations = 0
-        
+
         # Muse S has 7 EEG channels: TP9, AF7, AF8, TP10, FPz, AUX_R, AUX_L
         channel_names = ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L']
-        
-        # Extract EEG segments (18 bytes each)
-        while offset < len(data) and iterations < max_iterations and channel_count < 7:
+
+        # For Gen1, process all 12 segments (some may be non-EEG data)
+        segment_count = 0
+        while offset < len(data) and iterations < max_iterations and segment_count < 12:
             iterations += 1
-            
+
             # Try EEG segment (18 bytes)
-            if offset + 18 <= len(data) and self._looks_like_eeg(data[offset:offset+18]):
-                samples = self._fast_unpack_eeg(data[offset:offset+18])
-                channel_name = channel_names[channel_count] if channel_count < len(channel_names) else f'ch{channel_count}'
-                decoded.eeg[channel_name] = samples
-                self.stats['eeg_samples'] += len(samples)
-                channel_count += 1
-                offset += 18
-            # Try PPG segment (20 bytes)  
-            elif offset + 20 <= len(data):
-                ppg_samples = self._fast_unpack_ppg(data[offset:offset+20])
+            if offset + 18 <= len(data):
+                segment = data[offset:offset+18]
+
+                # Check if this looks like EEG data
+                if self._looks_like_eeg(segment):
+                    samples = self._fast_unpack_eeg(segment)
+                    if samples and len([s for s in samples if -500 < s < 500]) >= 4:  # At least 4 valid samples
+                        channel_name = channel_names[channel_count] if channel_count < len(channel_names) else f'ch{channel_count}'
+                        decoded.eeg[channel_name] = samples
+                        self.stats['eeg_samples'] += len(samples)
+                        channel_count += 1
+
+                # Also try to extract PPG data from this segment
+                ppg_samples = self._fast_unpack_ppg_from_eeg_segment(segment)
                 if ppg_samples:
-                    decoded.ppg['samples'] = ppg_samples
+                    if 'samples' not in decoded.ppg:
+                        decoded.ppg['samples'] = []
+                    decoded.ppg['samples'].extend(ppg_samples)
                     self.stats['ppg_samples'] += len(ppg_samples)
-                    
+
                     # Update heart rate buffer
                     self.ppg_buffer.extend(ppg_samples)
-                    if len(ppg_samples) > 0:
-                        print(f"[Decoder] PPG: {len(ppg_samples)} samples, buffer: {len(self.ppg_buffer)}")  # Debug
                     if len(self.ppg_buffer) > 128:  # 2 seconds at 64Hz - faster initial HR
                         self._calculate_heart_rate(decoded)
                         if len(self.ppg_buffer) > 320:  # Keep max 5 seconds
                             self.ppg_buffer = self.ppg_buffer[-320:]
-                    
-                    offset += 20
-                else:
-                    offset += 1  # Skip one byte if not PPG
+
+                offset += 18
+                segment_count += 1
             else:
                 break  # Not enough data left
+
+        # If we found PPG data, log it
+        if decoded.ppg and 'samples' in decoded.ppg:
+            print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples")
     
     def _decode_type_f4(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xF4 packets (IMU)"""
@@ -271,7 +279,7 @@ class MuseRealtimeDecoder:
         """Fast PPG unpacking"""
         if len(data) < 20:
             return []
-        
+
         samples = []
         # Extract PPG samples (simplified)
         for i in range(0, 18, 3):
@@ -280,8 +288,23 @@ class MuseRealtimeDecoder:
                 val = (data[i] << 8) | data[i+1]
                 if val > 10000:  # PPG range check
                     samples.append(val)
-        
+
         return samples if len(samples) > 2 else []
+
+    def _fast_unpack_ppg_from_eeg_segment(self, data: bytes) -> List[int]:
+        """Extract PPG data from EEG segment (Gen1 compatibility)"""
+        if len(data) < 18:
+            return []
+
+        samples = []
+        # Look for PPG-like values in the EEG segment
+        for i in range(0, 16, 2):  # Check pairs of bytes
+            if i + 2 <= len(data):
+                val = (data[i] << 8) | data[i+1]
+                if val > 10000:  # PPG range check
+                    samples.append(val)
+
+        return samples if len(samples) > 0 else []
     
     def _calculate_heart_rate(self, decoded: DecodedData):
         """Calculate heart rate from PPG buffer"""

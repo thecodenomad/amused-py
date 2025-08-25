@@ -59,8 +59,14 @@ class MuseDeviceConfig:
             'service_uuid': "0000fe8d-0000-1000-8000-00805f9b34fb",  # May be same
             'control_char_uuid': "273e0001-4c4d-454d-96be-f03bac821358",  # May be same
             'sensor_char_uuids': [
-                "273e0013-4c4d-454d-96be-f03bac821358",  # Combined sensors
+                "273e0013-4c4d-454d-96be-f03bac821358",  # Combined sensors (primary)
                 "273e0003-4c4d-454d-96be-f03bac821358",  # EEG TP9
+                "273e0004-4c4d-454d-96be-f03bac821358",  # EEG AF7
+                "273e0005-4c4d-454d-96be-f03bac821358",  # EEG AF8
+                "273e0006-4c4d-454d-96be-f03bac821358",  # EEG TP10
+                "273e0007-4c4d-454d-96be-f03bac821358",  # EEG FPz
+                "273e0008-4c4d-454d-96be-f03bac821358",  # AUX Right
+                "273e0009-4c4d-454d-96be-f03bac821358",  # AUX Left
             ],
             'commands': {
                 'v1': bytes.fromhex('0376310a'),           # Version (Gen 1 style)
@@ -72,10 +78,10 @@ class MuseDeviceConfig:
                 'dc001': bytes.fromhex('0664633030310a'),  # Start streaming
                 'L1': bytes.fromhex('034c310a'),           # L1 command
             },
-            'eeg_scale_factor': 0.48828125,  # May need adjustment
-            'imu_accel_scale': 2.0 / 32768.0,
-            'imu_gyro_scale': 250.0 / 32768.0,
-            'expected_packet_types': [0xDF, 0xF4, 0xDB, 0xD9],  # May differ
+            'eeg_scale_factor': 1000.0 / 2048.0,  # Updated based on packet analysis
+            'imu_accel_scale': 1.0 / 100.0,       # Updated based on packet analysis
+            'imu_gyro_scale': 1.0 / 100.0,        # Updated based on packet analysis
+            'expected_packet_types': [0xDF, 0xF4, 0xDB, 0xD9],
             'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L']
         }
 
