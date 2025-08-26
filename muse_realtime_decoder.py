@@ -266,7 +266,7 @@ class MuseRealtimeDecoder:
 
                     # Update heart rate buffer
                     self.ppg_buffer.extend(ppg_samples)
-                    if len(self.ppg_buffer) > 128:  # 2 seconds at 64Hz - faster initial HR
+                    if len(self.ppg_buffer) > 64:  # Reduced from 128 for faster initial HR
                         self._calculate_heart_rate(decoded)
                         if len(self.ppg_buffer) > 320:  # Keep max 5 seconds
                             self.ppg_buffer = self.ppg_buffer[-320:]
@@ -444,7 +444,7 @@ class MuseRealtimeDecoder:
     
     def _calculate_heart_rate(self, decoded: DecodedData):
         """Calculate heart rate from PPG buffer"""
-        if len(self.ppg_buffer) < 128:  # Need at least 2 seconds
+        if len(self.ppg_buffer) < 64:  # Reduced from 128 for faster initial HR
             return
         
         try:
