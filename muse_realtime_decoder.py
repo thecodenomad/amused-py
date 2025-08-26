@@ -31,20 +31,57 @@ class DecodedData:
 class MuseRealtimeDecoder:
     """
     Real-time packet decoder for Muse S data streams
-    
+
     Features:
     - Zero-copy decoding where possible
     - Callback-based processing
     - Minimal memory footprint
     - Stream statistics
+    - Adaptive Gen1/Gen3 support
     """
-    
-    def __init__(self):
-        """Initialize decoder with default settings"""
-        # Scaling factors
-        self.EEG_SCALE = 1000.0 / 2048.0  # Convert to microvolts
-        self.IMU_SCALE = 1.0 / 100.0      # Convert to standard units
-        
+
+    def __init__(self, device_model: str = 'auto'):
+        """
+        Initialize decoder with device-specific settings
+
+        Args:
+            device_model: 'gen1', 'gen3', or 'auto' for adaptive detection
+        """
+        # Device configuration
+        self.device_model = device_model
+        self.detected_model = None
+
+        # Channel configurations for different device types
+        self.CHANNEL_CONFIGS = {
+            'gen1': {
+                'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
+                'max_channels': 4,
+                'eeg_scale': 1000.0 / 2048.0,
+                'imu_scale': 1.0 / 100.0
+            },
+            'gen3': {
+                'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L'],
+                'max_channels': 7,
+                'eeg_scale': 488.28125 / 2048.0,  # Gen3 specific scaling
+                'imu_scale': 2.0 / 32768.0       # Gen3 specific scaling
+            }
+        }
+
+        # Statistics (initialize before device configuration)
+        self.stats = {
+            'packets_decoded': 0,
+            'eeg_samples': 0,
+            'ppg_samples': 0,
+            'imu_samples': 0,
+            'decode_errors': 0,
+            'last_packet_time': None,
+            'device_model': self.device_model,
+            'detected_model': None
+        }
+
+        # Start with Gen1 defaults, will adapt based on device_model
+        self._configure_for_device('gen1')
+
         # Callbacks for different data types
         self.callbacks: Dict[str, List[Callable]] = {
             'eeg': [],
@@ -53,20 +90,60 @@ class MuseRealtimeDecoder:
             'heart_rate': [],
             'any': []  # Called for any packet
         }
-        
-        # Statistics
-        self.stats = {
-            'packets_decoded': 0,
-            'eeg_samples': 0,
-            'ppg_samples': 0,
-            'imu_samples': 0,
-            'decode_errors': 0,
-            'last_packet_time': None
-        }
-        
+
         # Buffers for derived metrics
         self.ppg_buffer = []
         self.last_heart_rate = None
+
+        # Adaptive detection state
+        self.channel_count_history = []
+        self.packets_analyzed = 0
+
+    def _configure_for_device(self, model: str):
+        """Configure decoder for specific device model"""
+        if model in self.CHANNEL_CONFIGS:
+            config = self.CHANNEL_CONFIGS[model]
+            self.eeg_channels = config['eeg_channels']
+            self.max_channels = config['max_channels']
+            self.EEG_SCALE = config['eeg_scale']
+            self.IMU_SCALE = config['imu_scale']
+            self.detected_model = model
+            self.stats['detected_model'] = model
+
+    def _adapt_device_model(self, packet_data: bytes):
+        """Adapt device model based on packet analysis"""
+        if self.device_model != 'auto':
+            return  # Don't adapt if explicitly set
+
+        self.packets_analyzed += 1
+
+        # Analyze packet for device-specific patterns
+        if len(packet_data) > 4:
+            # Count potential EEG segments
+            segment_count = 0
+            offset = 4
+            while offset + 18 <= len(packet_data):
+                segment = packet_data[offset:offset+18]
+                if self._looks_like_eeg(segment):
+                    segment_count += 1
+                offset += 18
+
+            self.channel_count_history.append(segment_count)
+
+            # Keep only recent history
+            if len(self.channel_count_history) > 10:
+                self.channel_count_history = self.channel_count_history[-10:]
+
+            # Detect device based on typical channel counts
+            if len(self.channel_count_history) >= 3:
+                avg_channels = sum(self.channel_count_history) / len(self.channel_count_history)
+
+                if avg_channels > 5 and self.detected_model != 'gen3':
+                    self._configure_for_device('gen3')
+                    print(f"[Decoder] Adapted to Gen3 (detected {avg_channels:.1f} avg channels)")
+                elif avg_channels <= 4 and self.detected_model != 'gen1':
+                    self._configure_for_device('gen1')
+                    print(f"[Decoder] Adapted to Gen1 (detected {avg_channels:.1f} avg channels)")
     
     def register_callback(self, data_type: str, callback: Callable[[DecodedData], None]):
         """
@@ -85,31 +162,35 @@ class MuseRealtimeDecoder:
     def decode(self, data: bytes, timestamp: Optional[datetime.datetime] = None) -> DecodedData:
         """
         Decode a raw BLE packet in real-time
-        
+
         Args:
             data: Raw packet bytes
             timestamp: Packet timestamp
-            
+
         Returns:
             DecodedData object with parsed values
         """
         if timestamp is None:
             timestamp = datetime.datetime.now()
-        
+
         self.stats['packets_decoded'] += 1
         self.stats['last_packet_time'] = timestamp
-        
+
         # Identify packet type
         if not data:
             return DecodedData(timestamp=timestamp, packet_type='EMPTY', raw_bytes=data)
-        
+
         packet_type_byte = data[0]
         decoded = DecodedData(
             timestamp=timestamp,
             packet_type=self._get_packet_type(packet_type_byte),
             raw_bytes=data
         )
-        
+
+        # Adaptive device detection
+        if self.device_model == 'auto':
+            self._adapt_device_model(data)
+
         try:
             # Fast path decoding based on packet type
             if packet_type_byte == 0xDF:
@@ -126,10 +207,10 @@ class MuseRealtimeDecoder:
         except Exception as e:
             self.stats['decode_errors'] += 1
             # Continue even if decoding fails
-        
+
         # Trigger callbacks
         self._trigger_callbacks(decoded)
-        
+
         return decoded
     
     def _get_packet_type(self, type_byte: int) -> str:
@@ -143,7 +224,7 @@ class MuseRealtimeDecoder:
         return types.get(type_byte, f'UNKNOWN_{type_byte:02X}')
     
     def _decode_type_df(self, data: bytes, decoded: DecodedData):
-        """Fast decode for 0xDF packets (EEG + PPG) - Gen1 compatible"""
+        """Fast decode for 0xDF packets (EEG + PPG) - Adaptive Gen1/Gen3"""
         decoded.eeg = {}
         decoded.ppg = {}
 
@@ -153,12 +234,13 @@ class MuseRealtimeDecoder:
         max_iterations = len(data)  # Prevent infinite loops
         iterations = 0
 
-        # Muse S has 7 EEG channels: TP9, AF7, AF8, TP10, FPz, AUX_R, AUX_L
-        channel_names = ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L']
+        # Use adaptive channel configuration based on detected device model
+        channel_names = self.eeg_channels  # Use configured channels (Gen1 or Gen3)
+        max_segments = self.max_channels   # Use configured max channels
 
-        # For Gen1, process all 12 segments (some may be non-EEG data)
+        # Process up to the maximum number of channels for the detected device
         segment_count = 0
-        while offset < len(data) and iterations < max_iterations and segment_count < 12:
+        while offset < len(data) and iterations < max_iterations and segment_count < max_segments:
             iterations += 1
 
             # Try EEG segment (18 bytes)
@@ -196,7 +278,7 @@ class MuseRealtimeDecoder:
 
         # If we found PPG data, log it
         if decoded.ppg and 'samples' in decoded.ppg:
-            print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples")
+            print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples from {self.detected_model} device")
 
     def decode_raw_packet(self, data: bytes, characteristic_uuid: str, timestamp=None) -> DecodedData:
         """
