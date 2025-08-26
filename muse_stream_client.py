@@ -156,6 +156,10 @@ class MuseStreamClient:
         # Auto-detection state
         self.auto_detected_model = None
 
+        # Streaming control
+        self._streaming_task = None
+        self._stop_event = asyncio.Event()
+
         # User callbacks
         self.user_callbacks = {
             'eeg': None,
@@ -639,6 +643,261 @@ class MuseStreamClient:
             summary['file_info'] = info
 
         return summary
+
+    def stop_streaming(self):
+        """Stop the current streaming session"""
+        if self._streaming_task and not self._streaming_task.done():
+            self.log("🛑 Stopping streaming...")
+            self._stop_event.set()
+            self.is_streaming = False
+        else:
+            self.log("⚠️ No active streaming session to stop")
+
+    async def disconnect(self):
+        """Disconnect from the Muse device"""
+        if self.client and self.client.is_connected:
+            try:
+                self.log("🔌 Disconnecting from Muse device...")
+
+                # Stop streaming first
+                if self.is_streaming:
+                    await self._stop_streaming_session()
+
+                # Stop notifications
+                try:
+                    await self.client.stop_notify(self.device_config['control_char_uuid'])
+                    for char_uuid in self.device_config['sensor_char_uuids']:
+                        await self.client.stop_notify(char_uuid)
+                except Exception as e:
+                    self.log(f"⚠️ Error stopping notifications: {e}")
+
+                # Close connection
+                await self.client.disconnect()
+                self.log("✅ Disconnected successfully")
+
+            except Exception as e:
+                self.log(f"❌ Error during disconnect: {e}")
+            finally:
+                self.client = None
+                self.is_streaming = False
+                self._stop_event.clear()
+        else:
+            self.log("⚠️ No active connection to disconnect")
+
+    async def _stop_streaming_session(self):
+        """Internal method to stop the streaming session"""
+        if self.client and self.client.is_connected:
+            try:
+                # Send halt command to stop streaming
+                await self.client.write_gatt_char(
+                    self.device_config['control_char_uuid'],
+                    self.device_config['commands']['h'],
+                    response=False
+                )
+                self.log("📡 Sent halt command to device")
+            except Exception as e:
+                self.log(f"⚠️ Error sending halt command: {e}")
+
+    async def connect_and_stream_async(self,
+                                      address: str,
+                                      duration_seconds: int = 30,
+                                      preset: str = 'p1034') -> bool:
+        """
+        Connect and stream data asynchronously (non-blocking)
+
+        This method starts streaming in the background and returns immediately.
+        Use stop_streaming() to stop the stream, and disconnect() to close the connection.
+
+        Args:
+            address: Device MAC address
+            duration_seconds: Streaming duration (0 for continuous)
+            preset: Sensor preset
+
+        Returns:
+            Success status (connection established)
+        """
+        if self._streaming_task and not self._streaming_task.done():
+            self.log("⚠️ Streaming already in progress")
+            return False
+
+        # Reset stop event
+        self._stop_event.clear()
+
+        # Start streaming in background
+        self._streaming_task = asyncio.create_task(
+            self._stream_task(address, duration_seconds, preset)
+        )
+
+        # Wait a moment for connection to establish
+        await asyncio.sleep(0.5)
+
+        if self.client and self.client.is_connected:
+            self.log("✅ Streaming started in background")
+            return True
+        else:
+            self.log("❌ Failed to establish connection")
+            return False
+
+    async def _stream_task(self, address: str, duration_seconds: int, preset: str):
+        """Background task for streaming"""
+        try:
+            self.log(f"🔄 Starting background streaming to {address}...")
+
+            async with BleakClient(address) as client:
+                self.client = client
+                self.log("✅ Connected!")
+
+                # Enable control notifications
+                await client.start_notify(self.device_config['control_char_uuid'], self.handle_control_notification)
+
+                # Auto-detect device model if requested
+                if self.device_model == "auto":
+                    detected_model = await self._auto_detect_device_model(client)
+                    if detected_model != 'gen3':  # Only switch if not Gen3 (which is our default)
+                        self.log(f"🔄 Switching to {detected_model} configuration")
+                        self.device_config = self._get_device_config(detected_model)
+                        self.auto_detected_model = detected_model
+
+                # Get device info
+                version_cmd = self.device_config['commands'].get('v1', self.device_config['commands']['v6'])
+                await client.write_gatt_char(self.device_config['control_char_uuid'], version_cmd, response=False)
+                await asyncio.sleep(0.1)
+
+                await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['s'], response=False)
+                await asyncio.sleep(0.1)
+
+                # Halt any existing streams
+                await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['h'], response=False)
+                await asyncio.sleep(0.1)
+
+                # Set preset
+                self.log(f"📡 Setting preset: {preset}")
+                if preset in self.device_config['commands']:
+                    await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands'][preset], response=False)
+
+                    # Gen1 specific handling
+                    if 'Gen 1' in self.device_config.get('name', ''):
+                        await asyncio.sleep(0.1)
+                        # Try to use the lowest rate preset for Gen1
+                        if 'p1036' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p1036'], response=False)
+                            self.log("Applied Gen1 ultra-low-rate preset (p1036) for 128Hz-like performance")
+                        elif 'p23' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p23'], response=False)
+                            self.log("Applied Gen1 low-rate preset (p23) for better data quality")
+                        elif 'p22' in self.device_config['commands']:
+                            await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['p22'], response=False)
+                            self.log("Applied Gen1 low-rate preset (p22) for better data quality")
+
+                        # Add quality-based stabilization for Gen1 devices
+                        await self._wait_for_signal_quality(client)
+                else:
+                    self.log(f"⚠️ Preset {preset} not available for {self.device_config['name']}")
+                await asyncio.sleep(0.1)
+
+                # Enable sensor notifications
+                enabled_count = 0
+                if 'Gen 1' in self.device_config.get('name', ''):
+                    # Gen1: Enable ALL sensor characteristics
+                    for char_uuid in self.device_config['sensor_char_uuids']:
+                        try:
+                            await client.start_notify(char_uuid, self.handle_sensor_notification)
+                            enabled_count += 1
+                            self.log(f"📡 Sensor notifications enabled ({char_uuid[-4:]})")
+                        except Exception as e:
+                            self.log(f"⚠️ Failed to enable {char_uuid[-4:]}: {e}")
+                            continue
+                else:
+                    # Gen3: Use first one that works
+                    for char_uuid in self.device_config['sensor_char_uuids']:
+                        try:
+                            await client.start_notify(char_uuid, self.handle_sensor_notification)
+                            enabled_count += 1
+                            self.log(f"📡 Sensor notifications enabled ({char_uuid[-4:]})")
+                            break
+                        except Exception as e:
+                            self.log(f"⚠️ Failed to enable {char_uuid[-4:]}: {e}")
+                            continue
+
+                if enabled_count == 0:
+                    self.log("❌ Failed to enable sensor notifications")
+                    return
+
+                self.log(f"✅ Successfully enabled {enabled_count} sensor notification(s)")
+
+                # Re-register user callbacks with decoder
+                if self.decoder:
+                    # Re-register all callbacks to ensure they're connected
+                    for callback_type in ['eeg', 'ppg', 'heart_rate', 'imu']:
+                        if self.user_callbacks.get(callback_type):
+                            # Clear and re-add
+                            self.decoder.callbacks[callback_type] = []
+
+                    if self.user_callbacks['eeg']:
+                        self.decoder.register_callback('eeg',
+                            lambda data: self.user_callbacks['eeg']({'channels': data.eeg, 'timestamp': data.timestamp}))
+                    if self.user_callbacks['ppg']:
+                        self.decoder.register_callback('ppg',
+                            lambda data: self.user_callbacks['ppg']({'samples': data.ppg.get('samples', []) if data.ppg else [], 'timestamp': data.timestamp}))
+                    if self.user_callbacks['heart_rate']:
+                        self.decoder.register_callback('heart_rate',
+                            lambda data: self.user_callbacks['heart_rate'](data.heart_rate) if data.heart_rate else None)
+                    if self.user_callbacks['imu']:
+                        self.decoder.register_callback('imu',
+                            lambda data: self.user_callbacks['imu']({'accel': data.imu.get('accel'), 'gyro': data.imu.get('gyro')}))
+
+                # Start streaming (SEND TWICE!)
+                self.log("🚀 Starting stream...")
+                await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['dc001'], response=False)
+                await asyncio.sleep(0.05)
+                await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['dc001'], response=False)
+                await asyncio.sleep(0.1)
+
+                # Send L1 command
+                await client.write_gatt_char(self.device_config['control_char_uuid'], self.device_config['commands']['L1'], response=False)
+
+                # Wait for streaming to start
+                await asyncio.sleep(2)
+
+                if not self.is_streaming:
+                    self.log("❌ Streaming failed to start")
+                    return
+
+                # Stream until stopped or duration expires
+                start_time = asyncio.get_event_loop().time()
+                while not self._stop_event.is_set():
+                    if duration_seconds > 0:
+                        elapsed = asyncio.get_event_loop().time() - start_time
+                        if elapsed >= duration_seconds:
+                            self.log(f"⏰ Duration limit reached ({duration_seconds}s)")
+                            break
+                    await asyncio.sleep(0.1)
+
+                # Stop streaming
+                self.log("🛑 Stopping background stream...")
+                await self._stop_streaming_session()
+
+        except Exception as e:
+            self.log(f"❌ Streaming error: {e}")
+        finally:
+            # Clean up
+            if self.raw_stream:
+                self.raw_stream.close()
+                if self.verbose:
+                    info = self.raw_stream.get_file_info()
+                    self.log(f"💾 Saved {info['packet_count']} packets ({info['file_size_mb']:.1f} MB)")
+
+            self.client = None
+            self.is_streaming = False
+            self._stop_event.clear()
+
+    def is_connected(self) -> bool:
+        """Check if currently connected to a device"""
+        return self.client is not None and self.client.is_connected
+
+    def is_streaming_active(self) -> bool:
+        """Check if streaming is currently active"""
+        return self.is_streaming and self._streaming_task and not self._streaming_task.done()
 
 # Convenience functions
 async def stream_only(duration_seconds: int = 30, preset: str = 'p1034', device_model: str = 'auto'):
