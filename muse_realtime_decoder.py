@@ -17,6 +17,7 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
     uniform_filter1d = None
+    find_peaks = None
 
 @dataclass
 class DecodedData:
@@ -69,6 +70,30 @@ class MuseRealtimeDecoder:
             }
         }
 
+        # Calibration tables for different device types (all forehead-mounted)
+        self.CALIBRATION_TABLES = {
+            'gen1': {
+                'ppg_scaling_factor': 1.0,        # Baseline scaling
+                'ppg_baseline_offset': 0.0,       # Baseline adjustment
+                'hr_scaling_factor': 1.0,         # Heart rate scaling (adjusted)
+                'hr_baseline_offset': 0.0,        # Heart rate baseline adjustment (adjusted)
+                'quality_threshold': 0.5,         # Signal quality threshold (lowered)
+                'peak_prominence': 0.2,           # Peak detection prominence (adjusted)
+                'ppg_range_min': 2000,            # Minimum valid PPG value
+                'ppg_range_max': 45000            # Maximum valid PPG value
+            },
+            'gen3': {
+                'ppg_scaling_factor': 1.0,        # Baseline scaling
+                'ppg_baseline_offset': 0.0,       # Baseline adjustment
+                'hr_scaling_factor': 1.0,         # Heart rate scaling (reference)
+                'hr_baseline_offset': 0.0,        # Heart rate baseline adjustment
+                'quality_threshold': 0.7,         # Signal quality threshold
+                'peak_prominence': 0.3,           # Peak detection prominence
+                'ppg_range_min': 5000,            # Minimum valid PPG value
+                'ppg_range_max': 30000            # Maximum valid PPG value
+            }
+        }
+
         # Statistics (initialize before device configuration)
         self.stats = {
             'packets_decoded': 0,
@@ -111,6 +136,55 @@ class MuseRealtimeDecoder:
             self.IMU_SCALE = config['imu_scale']
             self.detected_model = model
             self.stats['detected_model'] = model
+
+    def _detect_device_model(self):
+        """Detect device model (simplified - defaults to gen3)"""
+        if self.device_model == 'auto':
+            # Default to gen3 for now - could be enhanced with BLE characteristic detection
+            self.device_model = 'gen3'
+            self._configure_for_device('gen3')
+
+    def _detect_device_and_site(self):
+        """Detect device model (Muse headbands are always forehead-mounted)"""
+        if self.device_model == 'auto':
+            # Try to detect device model from BLE characteristics or packet patterns
+            self.device_model = self._identify_device_model()
+
+        # Muse headbands are designed for forehead placement only
+
+    def _identify_device_model(self) -> str:
+        """Identify Muse device model"""
+        # Default to gen3 for now - could be enhanced with BLE characteristic detection
+        return 'gen3'  # Muse S Gen3/Athena is the most common
+
+
+
+    def _assess_signal_quality(self) -> float:
+        """Assess PPG signal quality for heart rate calculation"""
+        if len(self.ppg_buffer) < 50:  # Need minimum samples
+            return 0.0
+
+        try:
+            # Calculate signal quality metrics
+            signal_std = np.std(self.ppg_buffer[-200:] if len(self.ppg_buffer) > 200 else self.ppg_buffer)
+            signal_mean = np.mean(self.ppg_buffer[-200:] if len(self.ppg_buffer) > 200 else self.ppg_buffer)
+
+            if signal_mean == 0:
+                return 0.0
+
+            # Signal-to-noise ratio (simplified)
+            snr = signal_std / (abs(signal_mean) + 1e-6)  # Avoid division by zero
+
+            # Normalize quality score (0-1)
+            # Good SNR threshold varies by device
+            device_key = self.detected_model or 'gen3'
+            calibration = self.CALIBRATION_TABLES.get(device_key, self.CALIBRATION_TABLES['gen3'])
+
+            quality = min(float(snr) / 0.5, 1.0)  # 0.5 is good SNR threshold
+            return quality
+
+        except Exception:
+            return 0.0
 
     def _adapt_device_model(self, packet_data: bytes):
         """Adapt device model based on packet analysis"""
@@ -421,11 +495,15 @@ class MuseRealtimeDecoder:
         return samples
     
     def _fast_unpack_ppg(self, data: bytes) -> List[int]:
-        """Fast PPG unpacking - Device-specific extraction"""
+        """Fast PPG unpacking - Device-specific extraction with calibration"""
         if len(data) < 6:
             return []
 
         samples = []
+
+        # Get device-specific calibration for range validation
+        device_key = self.detected_model or 'gen3'
+        calibration = self.CALIBRATION_TABLES.get(device_key, self.CALIBRATION_TABLES['gen3'])
 
         # Apply device-specific PPG extraction based on detected model
         if self.detected_model == 'gen1':
@@ -437,10 +515,11 @@ class MuseRealtimeDecoder:
                 if i + 1 < len(data):
                     val = (data[i] << 8) | data[i+1]
 
-                    # Gen1 PPG values are typically in a narrower range than Gen3
-                    # and may have different baseline characteristics
-                    if 2000 <= val <= 45000:  # Gen1 specific PPG range
-                        samples.append(val)
+                    # Use calibration-based range validation
+                    if calibration['ppg_range_min'] <= val <= calibration['ppg_range_max']:
+                        # Apply device-specific scaling and baseline adjustment
+                        calibrated_val = int(val * calibration['ppg_scaling_factor'] + calibration['ppg_baseline_offset'])
+                        samples.append(calibrated_val)
 
             # If we didn't get enough samples, try Gen1-specific 20-bit extraction
             if len(samples) < 3:
@@ -449,16 +528,18 @@ class MuseRealtimeDecoder:
                     if i + 2 < len(data):
                         # Gen1 20-bit sample extraction
                         val = ((data[i] & 0x0F) << 16) | (data[i+1] << 8) | data[i+2]
-                        if 2000 <= val <= 45000:  # Gen1 range
-                            samples.append(val)
+                        if calibration['ppg_range_min'] <= val <= calibration['ppg_range_max']:
+                            calibrated_val = int(val * calibration['ppg_scaling_factor'] + calibration['ppg_baseline_offset'])
+                            samples.append(calibrated_val)
         else:
-            # Gen3 (default) PPG extraction - original logic preserved
+            # Gen3 (default) PPG extraction - use calibration for validation
             for i in range(0, 18, 3):
                 if i + 2 < len(data):
                     # 20-bit samples, simplified to 16-bit for speed
                     val = (data[i] << 8) | data[i+1]
-                    if 5000 <= val <= 30000:  # Original Gen3 range
-                        samples.append(val)
+                    if calibration['ppg_range_min'] <= val <= calibration['ppg_range_max']:
+                        calibrated_val = int(val * calibration['ppg_scaling_factor'] + calibration['ppg_baseline_offset'])
+                        samples.append(calibrated_val)
 
         return samples if len(samples) > 2 else []
 
@@ -493,8 +574,20 @@ class MuseRealtimeDecoder:
         return samples if len(samples) > 0 else []
     
     def _calculate_heart_rate(self, decoded: DecodedData):
-        """Calculate heart rate from PPG buffer - Device-specific calculation"""
+        """Calculate heart rate from PPG buffer with device-specific calibration"""
         if len(self.ppg_buffer) < 32:  # Basic threshold
+            return
+
+        # Get device-specific calibration
+        device_model = self.detected_model or 'gen3'
+        calibration = self.CALIBRATION_TABLES.get(device_model, self.CALIBRATION_TABLES['gen3'])
+
+        # Assess signal quality first
+        quality_score = self._assess_signal_quality()
+
+        # Only proceed if signal quality meets threshold
+        if quality_score < calibration['quality_threshold']:
+            print(f"[Decoder] Signal quality too low ({quality_score:.2f} < {calibration['quality_threshold']})")
             return
 
         try:
@@ -505,6 +598,9 @@ class MuseRealtimeDecoder:
 
             if not SCIPY_AVAILABLE:
                 return
+
+            # Apply device-specific PPG scaling and baseline adjustment
+            signal = signal * calibration['ppg_scaling_factor'] + calibration['ppg_baseline_offset']
 
             # Apply device-specific heart rate calculation
             if self.detected_model == 'gen1':
@@ -547,14 +643,16 @@ class MuseRealtimeDecoder:
             for sample_rate in rates_to_try:
                 # Apply device-specific peak detection parameters
                 if self.detected_model == 'gen1':
-                    # Gen1-optimized peak detection parameters - more conservative
+                    # Gen1-optimized peak detection parameters - use calibration values
                     min_distance = sample_rate / 2.5  # Max HR ~150 BPM (more conservative)
                     max_distance = sample_rate / 0.8  # Min HR ~48 BPM (higher minimum)
 
-                    # More conservative prominence threshold for Gen1
-                    prominence_threshold = np.std(signal) * 0.15  # Lower threshold
+                    # Use calibration-based prominence threshold
+                    prominence_threshold = np.std(signal) * calibration['peak_prominence']
                     height_threshold = np.mean(signal) + np.std(signal) * 0.05  # Lower height
 
+                    if not SCIPY_AVAILABLE:
+                        return
                     peaks, _ = find_peaks(signal,  # type: ignore
                                         distance=min_distance,
                                         prominence=prominence_threshold,
@@ -566,30 +664,38 @@ class MuseRealtimeDecoder:
 
                         # Filter out outliers (peaks that are too close or too far)
                         valid_intervals = [interval for interval in peak_intervals
-                                         if 0.4 <= interval <= 1.25]  # 48-150 BPM range
+                                          if 0.4 <= interval <= 1.25]  # 48-150 BPM range
 
                         if len(valid_intervals) >= 2:
-                            heart_rate = 60.0 / np.mean(valid_intervals)
+                            raw_hr = 60.0 / np.mean(valid_intervals)
+
+                            # Apply device-specific calibration
+                            calibrated_hr = raw_hr * calibration['hr_scaling_factor'] + calibration['hr_baseline_offset']
 
                             # Gen1-optimized valid range - more conservative
-                            if 45 <= heart_rate <= 130:  # Conservative range for Gen1
-                                decoded.heart_rate = float(heart_rate)
-                                self.last_heart_rate = float(heart_rate)
-                                print(f"[Decoder] Calculated HR: {heart_rate:.1f} BPM at {sample_rate}Hz")
+                            if 45 <= calibrated_hr <= 130:  # Conservative range for Gen1
+                                decoded.heart_rate = float(calibrated_hr)
+                                self.last_heart_rate = float(calibrated_hr)
+                                print(f"[Decoder] Calibrated HR: {calibrated_hr:.1f} BPM ({self.detected_model}) at {sample_rate}Hz")
                                 break
                 else:
-                    # Gen3 (default) peak detection - original logic preserved
-                    peaks, _ = find_peaks(signal, distance=40, prominence=np.std(signal)*0.3)  # type: ignore
+                    # Gen3 (default) peak detection - use calibration values
+                    if not SCIPY_AVAILABLE:
+                        return
+                    peaks, _ = find_peaks(signal, distance=40, prominence=np.std(signal)*calibration['peak_prominence'])  # type: ignore
 
                     if len(peaks) > 1:
                         # Calculate heart rate
                         peak_intervals = np.diff(peaks) / sample_rate  # Use detected rate
-                        heart_rate = 60.0 / np.mean(peak_intervals)
+                        raw_hr = 60.0 / np.mean(peak_intervals)
 
-                        if 40 < heart_rate < 200:  # Physiological range
-                            decoded.heart_rate = float(heart_rate)
-                            self.last_heart_rate = float(heart_rate)
-                            print(f"[Decoder] Calculated HR: {heart_rate:.1f} BPM at {sample_rate}Hz")
+                        # Apply device-specific calibration
+                        calibrated_hr = raw_hr * calibration['hr_scaling_factor'] + calibration['hr_baseline_offset']
+
+                        if 40 < calibrated_hr < 200:  # Physiological range
+                            decoded.heart_rate = float(calibrated_hr)
+                            self.last_heart_rate = float(calibrated_hr)
+                            print(f"[Decoder] Calibrated HR: {calibrated_hr:.1f} BPM ({self.detected_model}) at {sample_rate}Hz")
                             break
         except Exception as e:
             print(f"[Decoder] Heart rate calculation error: {e}")
@@ -630,15 +736,13 @@ class MuseRealtimeDecoder:
                     if spectrum:
                         best_freq = max(spectrum, key=lambda x: x[1])[0]
 
-                        # Gen1 sampling rate mapping - conservative approach
-                        if 5 <= best_freq <= 8:     # Very low frequency PPG (resting HR)
+                        # Gen1 sampling rate mapping - MORE conservative approach
+                        if 5 <= best_freq <= 10:    # Low frequency PPG (resting HR) - expanded range
                             return 16.0
-                        elif 8 <= best_freq <= 12:  # Low frequency PPG
+                        elif 10 <= best_freq <= 15: # Medium frequency PPG
                             return 21.33
-                        elif 12 <= best_freq <= 16: # Medium frequency PPG
-                            return 32.0
                         else:                       # Higher frequency PPG
-                            return 21.33  # Default to most common Gen1 rate
+                            return 16.0  # Default to 16.0 Hz for Gen1 (more conservative)
                 except:
                     pass
 
@@ -647,17 +751,17 @@ class MuseRealtimeDecoder:
             mean_val = np.mean(np.abs(signal))
 
             # Gen1 PPG data typically has different variability patterns
-            # Be more conservative with rate selection
-            if std_dev < 300:      # Gen1 low variability (likely resting)
+            # Be more conservative with rate selection - bias toward lower rates
+            if std_dev < 500:      # Gen1 low variability (likely resting) - lower threshold
                 return 16.0
-            elif std_dev < 1000:   # Gen1 medium variability
+            elif std_dev < 1500:   # Gen1 medium variability - lower threshold
+                return 16.0        # Changed from 21.33 to 16.0
+            elif std_dev < 2500:   # Gen1 high variability - lower threshold
                 return 21.33
-            elif std_dev < 2000:   # Gen1 high variability
-                return 32.0
             else:                  # Gen1 very high variability
-                return 21.33       # Conservative default
+                return 16.0        # Changed from 21.33 to 16.0
 
-            return 21.33  # Gen1 safe default - most common resting HR rate
+            return 16.0  # Gen1 safe default - changed from 21.33 to 16.0
         else:
             # Gen3 (default) sampling rate detection - original logic preserved
             # Check for common sampling rates by looking at signal variance patterns
@@ -667,6 +771,8 @@ class MuseRealtimeDecoder:
                 corr = corr[len(corr)//2:]
 
                 # Find peaks in autocorrelation
+                if not SCIPY_AVAILABLE:
+                    return 64.0  # Gen3 default
                 peaks, _ = find_peaks(corr[:len(corr)//4], distance=10, prominence=np.std(corr)*0.1)  # type: ignore
 
                 if len(peaks) > 0:
