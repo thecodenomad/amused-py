@@ -75,12 +75,12 @@ class MuseRealtimeDecoder:
             'gen1': {
                 'ppg_scaling_factor': 1.0,        # Baseline scaling
                 'ppg_baseline_offset': 0.0,       # Baseline adjustment
-                'hr_scaling_factor': 1.05,        # Heart rate scaling (slight boost)
-                'hr_baseline_offset': 3.0,        # Heart rate baseline adjustment (slight boost)
-                'quality_threshold': 0.1,         # Signal quality threshold (very permissive)
-                'peak_prominence': 0.25,          # Peak detection prominence (less conservative)
-                'ppg_range_min': 1000,            # Minimum valid PPG value (very inclusive)
-                'ppg_range_max': 60000            # Maximum valid PPG value (very inclusive)
+                'hr_scaling_factor': 1.12,        # Heart rate scaling (increased boost for accuracy)
+                'hr_baseline_offset': 5.0,        # Heart rate baseline adjustment (increased boost)
+                'quality_threshold': 0.08,        # Signal quality threshold (more permissive)
+                'peak_prominence': 0.2,           # Peak detection prominence (more sensitive)
+                'ppg_range_min': 800,             # Minimum valid PPG value (more inclusive)
+                'ppg_range_max': 65000            # Maximum valid PPG value (more inclusive)
             },
             'gen3': {
                 'ppg_scaling_factor': 1.0,        # Baseline scaling
@@ -632,7 +632,7 @@ class MuseRealtimeDecoder:
         try:
             signal = np.array(self.ppg_buffer[-640:] if len(self.ppg_buffer) > 640 else self.ppg_buffer)
 
-            # Apply device-specific signal preprocessing
+            # Apply improved signal preprocessing for PPG
             signal = signal - np.mean(signal)
 
             if not SCIPY_AVAILABLE:
@@ -640,6 +640,18 @@ class MuseRealtimeDecoder:
 
             # Apply device-specific PPG scaling and baseline adjustment
             signal = signal * calibration['ppg_scaling_factor'] + calibration['ppg_baseline_offset']
+
+            # Additional preprocessing for better peak detection
+            if len(signal) > 20:
+                # Apply light smoothing to reduce high-frequency noise
+                if uniform_filter1d is not None:
+                    signal = uniform_filter1d(signal, size=3)  # Light smoothing
+
+                # Ensure signal has reasonable dynamic range
+                signal_std = np.std(signal)
+                if signal_std > 0:
+                    # Normalize to improve peak detection consistency
+                    signal = signal / signal_std
 
             # Apply device-specific heart rate calculation
             if self.detected_model == 'gen1':
@@ -703,12 +715,20 @@ class MuseRealtimeDecoder:
                     min_distance = sample_rate * min_period  # Min samples between peaks
                     max_distance = sample_rate * max_period  # Max samples between peaks
 
-                    # Adaptive prominence threshold based on signal quality
-                    base_prominence = float(np.std(signal)) * calibration['peak_prominence']
-                    prominence_threshold = max(base_prominence, float(np.std(signal)) * 0.1)  # Minimum threshold
+                    # Improved prominence threshold based on signal characteristics
+                    signal_std = float(np.std(signal))
+                    signal_mean = float(np.mean(signal))
 
-                    # Height threshold optimized for PPG signals
-                    height_threshold = np.mean(signal) + np.std(signal) * 0.08  # Slightly higher for better peaks
+                    # Adaptive prominence based on signal quality and expected HR
+                    base_prominence = signal_std * calibration['peak_prominence']
+
+                    # More sophisticated prominence calculation
+                    # For PPG signals, prominence should be proportional to signal amplitude
+                    prominence_threshold = max(base_prominence * 0.8, signal_std * 0.15)  # More sensitive
+
+                    # Improved height threshold for PPG signals
+                    # PPG signals typically have peaks above mean + 0.5*std
+                    height_threshold = signal_mean + signal_std * 0.3  # More inclusive for PPG
 
                     if not SCIPY_AVAILABLE:
                         return
@@ -790,54 +810,62 @@ class MuseRealtimeDecoder:
 
         # Apply device-specific sampling rate detection
         if self.detected_model == 'gen1':
-            # Gen1-specific sampling rate detection - prioritize lower rates
-            # Gen1 devices typically use lower sampling rates than Gen3
+            # Gen1-specific sampling rate detection - improved accuracy
+            # Gen1 devices typically use 21.33 Hz for PPG, but can vary
 
-            # Method 1: Gen1-specific signal characteristics - focus on resting HR range
-            if len(signal) >= 64:
+            # Method 1: Improved autocorrelation-based detection
+            if len(signal) >= 128:  # Need more samples for reliable analysis
                 try:
-                    # Gen1 PPG signals often have more consistent periodicity
-                    # Look for heart rate frequencies typical of Gen1 (slower sampling)
-                    window_size = min(64, len(signal))
-                    spectrum = []
+                    # Use autocorrelation for periodicity detection
+                    signal_clean = signal - np.mean(signal)
 
-                    # Gen1 typical frequencies (lower than Gen3) - focus on resting HR range
-                    for freq in [6, 8, 10, 12, 15]:  # Gen1 PPG frequencies for 60-100 BPM
-                        period_samples = len(signal) // (freq * (len(signal) / 256.0))
-                        if period_samples > 1:
-                            sine_wave = np.sin(2 * np.pi * np.arange(len(signal)) / period_samples)
-                            correlation = np.abs(np.correlate(signal, sine_wave, mode='valid'))
-                            spectrum.append((freq, np.mean(correlation)))
+                    # Compute autocorrelation
+                    autocorr = np.correlate(signal_clean, signal_clean, mode='full')
+                    autocorr = autocorr[len(autocorr)//2:]  # Keep only positive lags
 
-                    if spectrum:
-                        best_freq = max(spectrum, key=lambda x: x[1])[0]
+                    # Find peaks in autocorrelation (potential periods)
+                    if not SCIPY_AVAILABLE:
+                        return 21.33  # Fallback
 
-                        # Gen1 sampling rate mapping - MORE conservative approach
-                        if 5 <= best_freq <= 10:    # Low frequency PPG (resting HR) - expanded range
-                            return 16.0
-                        elif 10 <= best_freq <= 15: # Medium frequency PPG
-                            return 21.33
-                        else:                       # Higher frequency PPG
-                            return 16.0  # Default to 16.0 Hz for Gen1 (more conservative)
+                    peaks, _ = find_peaks(autocorr, distance=10, prominence=np.std(autocorr)*0.1)  # type: ignore
+
+                    if len(peaks) > 0:
+                        # Get the most prominent peak (likely fundamental period)
+                        peak_heights = autocorr[peaks]
+                        best_peak_idx = np.argmax(peak_heights)
+                        period_samples = peaks[best_peak_idx]
+
+                        if period_samples > 0:
+                            # Estimate sampling rate from period
+                            # For heart rate around 73 BPM (1.22 Hz), period should be ~16-22 samples
+                            estimated_freq = len(signal) / (period_samples * 10.0)  # Rough estimate
+
+                            # Map to likely sampling rates
+                            if 15 <= estimated_freq <= 25:
+                                return 21.33  # Close to expected 21.33 Hz
+                            elif 10 <= estimated_freq <= 15:
+                                return 16.0   # Close to 16 Hz
                 except:
                     pass
 
-            # Method 2: Gen1 statistical approach - more conservative
+            # Method 2: Improved statistical approach
             std_dev = np.std(signal)
             mean_val = np.mean(np.abs(signal))
 
-            # Gen1 PPG data typically has different variability patterns
-            # Be more conservative with rate selection - bias toward lower rates
-            if std_dev < 500:      # Gen1 low variability (likely resting) - lower threshold
-                return 16.0
-            elif std_dev < 1500:   # Gen1 medium variability - lower threshold
-                return 16.0        # Changed from 21.33 to 16.0
-            elif std_dev < 2500:   # Gen1 high variability - lower threshold
-                return 21.33
-            else:                  # Gen1 very high variability
-                return 16.0        # Changed from 21.33 to 16.0
+            # More nuanced analysis based on signal characteristics
+            signal_range = np.ptp(signal)  # Peak-to-peak range
 
-            return 16.0  # Gen1 safe default - changed from 21.33 to 16.0
+            # Gen1 PPG characteristics analysis
+            if signal_range < 1000:  # Low amplitude signal
+                return 16.0  # Likely lower sampling rate
+            elif std_dev < 800:  # Low variability
+                return 21.33  # Higher sampling rate for better resolution
+            elif signal_range > 3000:  # High amplitude signal
+                return 16.0  # Lower rate for stability
+            else:
+                return 21.33  # Default to higher rate for Gen1
+
+            return 21.33  # Gen1 improved default
         else:
             # Gen3 (default) sampling rate detection - original logic preserved
             # Check for common sampling rates by looking at signal variance patterns
