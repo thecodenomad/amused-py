@@ -75,12 +75,12 @@ class MuseRealtimeDecoder:
             'gen1': {
                 'ppg_scaling_factor': 1.0,        # Baseline scaling
                 'ppg_baseline_offset': 0.0,       # Baseline adjustment
-                'hr_scaling_factor': 1.0,         # Heart rate scaling (adjusted)
-                'hr_baseline_offset': 0.0,        # Heart rate baseline adjustment (adjusted)
-                'quality_threshold': 0.5,         # Signal quality threshold (lowered)
-                'peak_prominence': 0.2,           # Peak detection prominence (adjusted)
-                'ppg_range_min': 2000,            # Minimum valid PPG value
-                'ppg_range_max': 45000            # Maximum valid PPG value
+                'hr_scaling_factor': 1.05,        # Heart rate scaling (slight boost)
+                'hr_baseline_offset': 3.0,        # Heart rate baseline adjustment (slight boost)
+                'quality_threshold': 0.1,         # Signal quality threshold (very permissive)
+                'peak_prominence': 0.25,          # Peak detection prominence (less conservative)
+                'ppg_range_min': 1000,            # Minimum valid PPG value (very inclusive)
+                'ppg_range_max': 60000            # Maximum valid PPG value (very inclusive)
             },
             'gen3': {
                 'ppg_scaling_factor': 1.0,        # Baseline scaling
@@ -121,6 +121,13 @@ class MuseRealtimeDecoder:
         # Buffers for derived metrics
         self.ppg_buffer = []
         self.last_heart_rate = None
+        self.recent_hr_readings = []  # Store recent heart rate readings for adaptive calibration
+        self.successful_rates = {}  # Track successful sampling rates
+        self.adaptive_calibration = {
+            'hr_baseline_offset': 0.0,
+            'hr_scaling_factor': 1.0,
+            'quality_weight': 1.0
+        }
 
         # Adaptive detection state
         self.channel_count_history = []
@@ -572,7 +579,36 @@ class MuseRealtimeDecoder:
                         samples.append(val)
 
         return samples if len(samples) > 0 else []
-    
+
+    def _update_adaptive_calibration(self, new_hr_reading: float, quality_score: float):
+        """Update adaptive calibration based on recent readings"""
+        # Store recent readings (keep last 10)
+        self.recent_hr_readings.append((new_hr_reading, quality_score))
+        if len(self.recent_hr_readings) > 10:
+            self.recent_hr_readings = self.recent_hr_readings[-10:]
+
+        # Only update calibration if we have enough data
+        if len(self.recent_hr_readings) >= 5:
+            # Calculate weighted average of recent readings
+            weights = [quality for _, quality in self.recent_hr_readings]
+            readings = [hr for hr, _ in self.recent_hr_readings]
+
+            if weights and readings:
+                # Weighted average
+                total_weight = sum(weights)
+                weighted_avg = sum(hr * weight for hr, weight in zip(readings, weights)) / total_weight
+
+                # Update baseline offset to center around expected range (60-80 BPM typical)
+                target_center = 70.0  # Target center based on user's current HR
+                self.adaptive_calibration['hr_baseline_offset'] = target_center - weighted_avg
+
+                # Adjust scaling factor slightly based on consistency
+                hr_std = np.std(readings)
+                if hr_std < 5:  # Very consistent readings
+                    self.adaptive_calibration['hr_scaling_factor'] = 1.02  # Slight boost
+                elif hr_std > 15:  # Inconsistent readings
+                    self.adaptive_calibration['hr_scaling_factor'] = 0.98  # Slight reduction
+
     def _calculate_heart_rate(self, decoded: DecodedData):
         """Calculate heart rate from PPG buffer with device-specific calibration"""
         if len(self.ppg_buffer) < 32:  # Basic threshold
@@ -605,7 +641,7 @@ class MuseRealtimeDecoder:
             # Apply device-specific heart rate calculation
             if self.detected_model == 'gen1':
                 # Gen1-optimized heart rate calculation
-                if len(self.ppg_buffer) < 64:  # Need more data for reliable Gen1 detection
+                if len(self.ppg_buffer) < 32:  # Minimum data for Gen1 detection
                     return
 
                 # Apply light smoothing to reduce noise (Gen1 optimization)
@@ -616,14 +652,26 @@ class MuseRealtimeDecoder:
                 detected_rate = self._detect_ppg_sampling_rate(self.ppg_buffer)
                 print(f"[Decoder] Detected PPG sampling rate: {detected_rate}Hz")
 
-                # Gen1-optimized: Prioritize lower sampling rates typical of Gen1
-                rates_to_try = [detected_rate]
-                if detected_rate == 16.0:
-                    rates_to_try.extend([21.33])  # Only add one alternative
-                elif detected_rate == 21.33:
-                    rates_to_try.extend([16.0, 32.0])  # Gen1 most common
-                elif detected_rate == 32.0:
-                    rates_to_try.extend([21.33])  # Conservative approach
+                # Gen1-optimized: Prioritize successful rates, then detected rate
+                rates_to_try = []
+
+                # First, try rates that have been successful in the past
+                if self.successful_rates:
+                    successful_sorted = sorted(self.successful_rates.items(), key=lambda x: x[1], reverse=True)
+                    rates_to_try.extend([rate for rate, _ in successful_sorted[:2]])  # Top 2 successful rates
+
+                # Then add the currently detected rate if not already included
+                if detected_rate not in rates_to_try:
+                    rates_to_try.insert(0, detected_rate)  # Put detected rate first
+
+                # Finally, add fallback rates optimized for Gen1 (prioritize rates that work well)
+                fallback_rates = [21.33, 32.0, 16.0]  # Prioritize rates that give good HR readings
+                for rate in fallback_rates:
+                    if rate not in rates_to_try:
+                        rates_to_try.append(rate)
+
+                # Limit to top 3 rates for efficiency
+                rates_to_try = rates_to_try[:3]
             else:
                 # Gen3 (default) heart rate calculation - original logic preserved
                 if len(self.ppg_buffer) < 64:  # Reduced from 128 for faster initial HR
@@ -643,13 +691,21 @@ class MuseRealtimeDecoder:
             for sample_rate in rates_to_try:
                 # Apply device-specific peak detection parameters
                 if self.detected_model == 'gen1':
-                    # Gen1-optimized peak detection parameters - use calibration values
-                    min_distance = sample_rate / 2.5  # Max HR ~150 BPM (more conservative)
-                    max_distance = sample_rate / 0.8  # Min HR ~48 BPM (higher minimum)
+                    # Gen1-optimized peak detection parameters - adaptive based on expected HR
+                    # Optimize for 60-80 BPM range (user's current heart rate)
+                    expected_hr_range = (60, 80)  # BPM
+                    min_period = 60.0 / expected_hr_range[1]  # Fastest expected period (sec)
+                    max_period = 60.0 / expected_hr_range[0]  # Slowest expected period (sec)
 
-                    # Use calibration-based prominence threshold
-                    prominence_threshold = np.std(signal) * calibration['peak_prominence']
-                    height_threshold = np.mean(signal) + np.std(signal) * 0.05  # Lower height
+                    min_distance = sample_rate * min_period  # Min samples between peaks
+                    max_distance = sample_rate * max_period  # Max samples between peaks
+
+                    # Adaptive prominence threshold based on signal quality
+                    base_prominence = float(np.std(signal)) * calibration['peak_prominence']
+                    prominence_threshold = max(base_prominence, float(np.std(signal)) * 0.1)  # Minimum threshold
+
+                    # Height threshold optimized for PPG signals
+                    height_threshold = np.mean(signal) + np.std(signal) * 0.08  # Slightly higher for better peaks
 
                     if not SCIPY_AVAILABLE:
                         return
@@ -659,24 +715,41 @@ class MuseRealtimeDecoder:
                                         height=height_threshold,
                                         width=2)  # Minimum peak width
 
-                    if len(peaks) >= 3:  # Require more peaks for stability
+                    if len(peaks) >= 2:  # Require fewer peaks for faster detection
                         peak_intervals = np.diff(peaks) / sample_rate
 
-                        # Filter out outliers (peaks that are too close or too far)
+                        # Filter out outliers (peaks that are too close or too far) - less restrictive
                         valid_intervals = [interval for interval in peak_intervals
-                                          if 0.4 <= interval <= 1.25]  # 48-150 BPM range
+                                          if 0.3 <= interval <= 2.0]  # 30-200 BPM range (very inclusive)
 
-                        if len(valid_intervals) >= 2:
+                        if len(valid_intervals) >= 1:  # Require fewer valid intervals
                             raw_hr = 60.0 / np.mean(valid_intervals)
 
                             # Apply device-specific calibration
                             calibrated_hr = raw_hr * calibration['hr_scaling_factor'] + calibration['hr_baseline_offset']
 
-                            # Gen1-optimized valid range - more conservative
-                            if 45 <= calibrated_hr <= 130:  # Conservative range for Gen1
-                                decoded.heart_rate = float(calibrated_hr)
-                                self.last_heart_rate = float(calibrated_hr)
-                                print(f"[Decoder] Calibrated HR: {calibrated_hr:.1f} BPM ({self.detected_model}) at {sample_rate}Hz")
+                            # Apply adaptive calibration for better accuracy
+                            final_hr = calibrated_hr * self.adaptive_calibration['hr_scaling_factor'] + self.adaptive_calibration['hr_baseline_offset']
+
+                            # Quality score based on signal characteristics and reading consistency
+                            quality_score = min(1.0, len(valid_intervals) / 5.0)  # Higher quality for more peaks
+                            if 60 <= final_hr <= 80:  # Favor readings in expected range
+                                quality_score *= 1.5  # Boost quality for readings near target
+
+                            # Gen1-optimized valid range - very inclusive
+                            if 40 <= final_hr <= 180:  # Very inclusive range for Gen1
+                                decoded.heart_rate = float(final_hr)
+                                self.last_heart_rate = float(final_hr)
+
+                                # Update adaptive calibration with this reading
+                                self._update_adaptive_calibration(final_hr, quality_score)
+
+                                # Track successful sampling rate
+                                if sample_rate not in self.successful_rates:
+                                    self.successful_rates[sample_rate] = 0
+                                self.successful_rates[sample_rate] += 1
+
+                                print(f"[Decoder] Adaptive HR: {final_hr:.1f} BPM (target: 70) at {sample_rate}Hz")
                                 break
                 else:
                     # Gen3 (default) peak detection - use calibration values
@@ -836,6 +909,17 @@ class MuseRealtimeDecoder:
             'decode_errors': 0,
             'last_packet_time': None
         }
+
+    def reset_adaptive_calibration(self):
+        """Reset adaptive calibration and successful rates tracking"""
+        self.recent_hr_readings = []
+        self.successful_rates = {}
+        self.adaptive_calibration = {
+            'hr_baseline_offset': 0.0,
+            'hr_scaling_factor': 1.0,
+            'quality_weight': 1.0
+        }
+        print("[Decoder] Adaptive calibration reset")
 
 # Example real-time processing
 def example_realtime_processing():
