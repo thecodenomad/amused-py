@@ -81,7 +81,7 @@ async def test_with_device():
     client.on_ppg(handle_ppg)
 
     print("\nStarting real-time streaming...")
-    print("Compare these readings with your secondary device (64 BPM)")
+    print("Compare these readings with your secondary device (80 BPM)")
     print("Press Ctrl+C to stop\n")
 
     try:

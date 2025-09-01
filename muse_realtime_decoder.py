@@ -598,9 +598,10 @@ class MuseRealtimeDecoder:
                 total_weight = sum(weights)
                 weighted_avg = sum(hr * weight for hr, weight in zip(readings, weights)) / total_weight
 
-                # Update baseline offset to center around expected range (60-80 BPM typical)
-                target_center = 70.0  # Target center based on user's current HR
-                self.adaptive_calibration['hr_baseline_offset'] = target_center - weighted_avg
+                # Use the weighted average as the target center instead of hardcoded value
+                # This prevents pulling readings toward an arbitrary target
+                target_center = weighted_avg
+                self.adaptive_calibration['hr_baseline_offset'] = 0.0  # Reset baseline offset
 
                 # Adjust scaling factor slightly based on consistency
                 hr_std = np.std(readings)
@@ -608,6 +609,8 @@ class MuseRealtimeDecoder:
                     self.adaptive_calibration['hr_scaling_factor'] = 1.02  # Slight boost
                 elif hr_std > 15:  # Inconsistent readings
                     self.adaptive_calibration['hr_scaling_factor'] = 0.98  # Slight reduction
+                else:
+                    self.adaptive_calibration['hr_scaling_factor'] = 1.0  # Neutral
 
     def _calculate_heart_rate(self, decoded: DecodedData):
         """Calculate heart rate from PPG buffer with device-specific calibration"""
@@ -749,7 +752,7 @@ class MuseRealtimeDecoder:
                                     self.successful_rates[sample_rate] = 0
                                 self.successful_rates[sample_rate] += 1
 
-                                print(f"[Decoder] Adaptive HR: {final_hr:.1f} BPM (target: 70) at {sample_rate}Hz")
+                                print(f"[Decoder] Adaptive HR: {final_hr:.1f} BPM at {sample_rate}Hz")
                                 break
                 else:
                     # Gen3 (default) peak detection - use calibration values
