@@ -8,19 +8,18 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from muse_realtime_decoder import MuseRealtimeDecoder
-from muse_stream_client import MuseStreamClient
-from muse_discovery import find_muse_devices
+from muse_decoder import MuseRealtimeDecoder
+from muse_client import MuseStreamClient
 import asyncio
 
-def on_heart_rate(data):
+def on_heart_rate(hr):
     """Handle heart rate data"""
-    if data.heart_rate:
-        print(".1f")
+    if hr:
+        print(f"Heart Rate: {hr:.1f} BPM")
 
 def on_ppg(data):
     """Handle PPG data"""
-    # data is raw PPG dict, not DecodedData object
+    # data is PPG dict with samples
     if isinstance(data, dict) and 'samples' in data:
         print(f"[PPG] {len(data['samples'])} samples received")
 
@@ -68,24 +67,19 @@ def test_decoder_only():
     print(f"Generated {len(ppg_samples)} synthetic PPG samples")
     print("Expected heart rate: ~75 BPM")
 
-    # Directly add samples to decoder buffer (bypass packet decoding for testing)
-    decoder.ppg_buffer.extend(ppg_samples)
+    # Add samples to decoder's heart rate processor
+    decoder.heart_rate_processor.add_ppg_samples(ppg_samples)
 
     print(f"Added {len(ppg_samples)} samples to PPG buffer")
 
-    # Force sampling rate detection to use correct rate
-    decoder.stable_sampling_rate = 64.0
-    decoder.sampling_rate_confidence = 10
-
     # Manually trigger heart rate calculation
-    from muse_realtime_decoder import DecodedData
-    import datetime
-    dummy_data = DecodedData(timestamp=datetime.datetime.now(), packet_type='TEST')
+    hr = decoder.heart_rate_processor.calculate_heart_rate()
+    if hr:
+        print(f"Calculated heart rate: {hr:.1f} BPM")
+    else:
+        print("Could not calculate heart rate (insufficient data or poor signal quality)")
 
-    # Force heart rate calculation
-    decoder._calculate_heart_rate(dummy_data)
-
-    print(f"PPG buffer size after calculation: {len(decoder.ppg_buffer)}")
+    print(f"PPG buffer size after calculation: {len(decoder.heart_rate_processor.ppg_buffer)}")
 
     print("\nTest completed!")
 
@@ -94,7 +88,10 @@ def test_decoder_only():
     print("\nFinal Statistics:")
     print(f"  Packets decoded: {stats['packets_decoded']}")
     print(f"  PPG samples collected: {stats['ppg_samples']}")
-    print(f"  Last heart rate: {stats['last_heart_rate']}")
+    if stats.get('last_heart_rate'):
+        print(f"  Last heart rate: {stats['last_heart_rate']:.1f} BPM")
+    if hr:
+        print(f"  Final calculated heart rate: {hr:.1f} BPM")
 
 async def test_with_device():
     """Test heart rate calculation with actual device"""
@@ -103,11 +100,27 @@ async def test_with_device():
     print("Real-time Heart Rate Test with Your Muse Device")
     print("=" * 60)
 
-    # Find device
-    print("Searching for Muse device...")
-    devices = await find_muse_devices(timeout=5.0)
+    # Create client with auto device detection
+    client = MuseStreamClient(device_model='auto', verbose=True)
 
-    if not devices:
+    # Store all PPG samples for final calculation
+    all_ppg_samples = []
+
+    def collect_ppg_samples(data):
+        """Collect PPG samples for final analysis"""
+        if isinstance(data, dict) and 'samples' in data:
+            samples = data['samples']
+            all_ppg_samples.extend(samples)
+
+    # Register callbacks using the new simplified API
+    client.on_heart_rate(lambda hr: print(f"Heart Rate: {hr:.1f} BPM"))
+    client.on_ppg(collect_ppg_samples)
+
+    # Find device using built-in scanner
+    print("Searching for Muse device...")
+    device = await client.find_device()
+
+    if not device:
         print("❌ No Muse device found!")
         print("Make sure your device is:")
         print("  - Turned on")
@@ -115,52 +128,17 @@ async def test_with_device():
         print("  - Bluetooth is enabled")
         return
 
-    device = devices[0]
     print(f"✅ Found device: {device.name} ({device.address})")
-
-    # Create decoder and client
-    decoder = MuseRealtimeDecoder(device_model='auto')
-
-    # Register callbacks
-    decoder.register_callback('heart_rate', lambda data: print(f"Heart Rate: {data.heart_rate:.1f} BPM") if data.heart_rate else None)
-    decoder.register_callback('ppg', lambda data: print(f"[PPG] {len(data.ppg.get('samples', [])) if data.ppg else 0} samples received"))
-
-    client = MuseStreamClient(
-        save_raw=False,
-        decode_realtime=True,
-        verbose=False
-    )
-
-    # Set up client callbacks to use our decoder
-    def handle_ppg(data):
-        # data is raw PPG dict from MuseStreamClient
-        if isinstance(data, dict) and 'samples' in data:
-            # Add PPG samples to decoder buffer
-            decoder.ppg_buffer.extend(data['samples'])
-            # Try to calculate heart rate
-            if len(decoder.ppg_buffer) > 64:
-                # Create a dummy decoded data object for heart rate calculation
-                from muse_realtime_decoder import DecodedData
-                import datetime
-                dummy_data = DecodedData(
-                    timestamp=datetime.datetime.now(),
-                    packet_type='PPG_TEST'
-                )
-                decoder._calculate_heart_rate(dummy_data)
-                if len(decoder.ppg_buffer) > 320:
-                    decoder.ppg_buffer = decoder.ppg_buffer[-320:]
-
-    client.on_ppg(handle_ppg)
 
     print("\nStarting real-time streaming...")
     print("Compare these readings with your secondary device (60 BPM +/- 5 BPM)")
     print("Press Ctrl+C to stop\n")
+    print("Expected: You should see PPG and EEG data being received...")
 
     try:
         success = await client.connect_and_stream(
             device.address,
-            duration_seconds=30,  # 30 second test
-            preset='p1035'
+            duration_seconds=30  # 30 second test
         )
 
         if success:
@@ -173,12 +151,37 @@ async def test_with_device():
     except Exception as e:
         print(f"\n❌ Error: {e}")
 
-    # Show final statistics
-    stats = decoder.get_stats()
+    # Perform final heart rate calculation from all collected PPG samples
+    final_hr = None
+    if all_ppg_samples:
+        print(f"\n🔄 Calculating final heart rate from {len(all_ppg_samples)} PPG samples...")
+
+        # Create a temporary decoder for final calculation
+        final_decoder = MuseRealtimeDecoder(device_model='gen1')
+
+        final_decoder.heart_rate_processor.add_ppg_samples(all_ppg_samples)
+
+        # Calculate final heart rate
+        final_hr = final_decoder.heart_rate_processor.calculate_heart_rate()
+
+        if final_hr:
+            print(f"📊 Final calculated heart rate: {final_hr:.1f} BPM")
+        else:
+            print("📊 Could not calculate final heart rate")
+    else:
+        print("❌ No PPG samples collected!")
+
+    # Show final statistics using the new client API
+    stats = client.get_stats()
     print("\nFinal Statistics:")
-    print(f"  Packets decoded: {stats['packets_decoded']}")
-    print(f"  PPG samples collected: {stats['ppg_samples']}")
-    print(f"  Last heart rate: {stats['last_heart_rate']}")
+    print(f"  Packets received: {stats['packets_received']}")
+    print(f"  EEG samples: {stats.get('eeg_samples', 0)}")
+    print(f"  PPG samples: {stats.get('ppg_samples', 0)}")
+    print(f"  IMU samples: {stats.get('imu_samples', 0)}")
+    if stats.get('last_heart_rate'):
+        print(f"  Last real-time heart rate: {stats['last_heart_rate']:.1f} BPM")
+    if final_hr:
+        print(f"  Final calculated heart rate: {final_hr:.1f} BPM")
 
 if __name__ == "__main__":
     import sys

@@ -64,9 +64,9 @@ class MuseRealtimeDecoder:
                 'imu_scale': 1.0 / 100.0,
                 'ppg_scaling_factor': 1.0,
                 'ppg_baseline_offset': 0.0,
-                'hr_scaling_factor': 0.88,  # Further reduced to bring 75 BPM to ~66 BPM
-                'hr_baseline_offset': -2.0,  # Negative offset to reduce readings
-                'quality_threshold': 0.08,
+                'hr_scaling_factor': 1.0,  # Reset to 1.0 for accurate readings
+                'hr_baseline_offset': 0.0,  # Reset to 0.0 for accurate readings
+                'quality_threshold': 0.05,
                 'peak_prominence': 0.2,
                 'ppg_range_min': 800,
                 'ppg_range_max': 65000,
@@ -135,6 +135,7 @@ class MuseRealtimeDecoder:
         self.last_heart_rate = None
         self.recent_hr_readings = []  # Store recent heart rate readings for adaptive calibration
         self.successful_rates = {}  # Track successful sampling rates
+        # Start with clean calibration state
         self.adaptive_calibration = {
             'hr_baseline_offset': 0.0,
             'hr_scaling_factor': 1.0,
@@ -147,9 +148,12 @@ class MuseRealtimeDecoder:
         self.heart_rate_history = []  # Store recent HR readings for filtering
         self.filtered_heart_rate = None  # Smoothed/filtered HR value
 
+        # Reset calibration history for clean start
+        self.calibration_history = []
+
         # Adaptive calibration learning
         self.calibration_history = []  # Store calibration performance
-        self.target_hr_range = (59, 65)  # Expected target range based on user's 62 BPM reading
+        self.target_hr_range = (69, 75)  # Expected target range based on user's 72 BPM reading
         self.calibration_learning_rate = 0.05  # Conservative learning rate for stability
 
         # Adaptive detection state
