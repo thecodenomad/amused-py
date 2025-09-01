@@ -157,7 +157,7 @@ class MuseStreamClient:
         self.auto_detected_model = None
 
         # User callbacks
-        self.user_callbacks = {
+        self.user_callbacks: Dict[str, Optional[Callable]] = {
             'eeg': None,
             'ppg': None,
             'imu': None,
@@ -221,10 +221,11 @@ class MuseStreamClient:
         except Exception as e:
             self.log(f"⚠️ Device name detection failed: {e}")
 
+        # Get control UUID for all detection methods
+        control_uuid = self.device_config['control_char_uuid']
+
         # Method 2: Try firmware version detection
         try:
-            control_uuid = self.device_config['control_char_uuid']
-
             # Try Gen1 version command first
             gen1_cmd = MuseDeviceConfig.get_gen1_config()['commands']['v1']
             await client.write_gatt_char(control_uuid, gen1_cmd, response=False)
@@ -293,14 +294,14 @@ class MuseStreamClient:
         self.user_callbacks['heart_rate'] = callback
         if self.decoder:
             self.decoder.register_callback('heart_rate',
-                lambda data: callback(data.heart_rate))
+                lambda data: callback(data.heart_rate) if data.heart_rate is not None else None)
 
     def on_imu(self, callback: Callable[[Dict[str, Any]], None]):
         """Register callback for IMU data"""
         self.user_callbacks['imu'] = callback
         if self.decoder:
             self.decoder.register_callback('imu',
-                lambda data: callback({'accel': data.imu.get('accel'), 'gyro': data.imu.get('gyro')}))
+                lambda data: callback({'accel': data.imu.get('accel') if data.imu else None, 'gyro': data.imu.get('gyro') if data.imu else None}))
 
     def on_packet(self, callback: Callable[[bytes], None]):
         """Register callback for raw packets"""
@@ -559,16 +560,16 @@ class MuseStreamClient:
 
                     if self.user_callbacks['eeg']:
                         self.decoder.register_callback('eeg',
-                            lambda data: self.user_callbacks['eeg']({'channels': data.eeg, 'timestamp': data.timestamp}))
+                            lambda data: self.user_callbacks['eeg']({'channels': data.eeg, 'timestamp': data.timestamp}) if self.user_callbacks['eeg'] else None)
                     if self.user_callbacks['ppg']:
                         self.decoder.register_callback('ppg',
-                            lambda data: self.user_callbacks['ppg']({'samples': data.ppg.get('samples', []) if data.ppg else [], 'timestamp': data.timestamp}))
+                            lambda data: self.user_callbacks['ppg']({'samples': data.ppg.get('samples', []) if data.ppg else [], 'timestamp': data.timestamp}) if self.user_callbacks['ppg'] else None)
                     if self.user_callbacks['heart_rate']:
                         self.decoder.register_callback('heart_rate',
-                            lambda data: self.user_callbacks['heart_rate'](data.heart_rate) if data.heart_rate else None)
+                            lambda data: self.user_callbacks['heart_rate'](data.heart_rate) if data.heart_rate and self.user_callbacks['heart_rate'] else None)
                     if self.user_callbacks['imu']:
                         self.decoder.register_callback('imu',
-                            lambda data: self.user_callbacks['imu']({'accel': data.imu.get('accel'), 'gyro': data.imu.get('gyro')}))
+                            lambda data: self.user_callbacks['imu']({'accel': data.imu.get('accel') if data.imu else None, 'gyro': data.imu.get('gyro') if data.imu else None}) if self.user_callbacks['imu'] else None)
 
                 # Start streaming (SEND TWICE!)
                 self.log("Starting stream...")
