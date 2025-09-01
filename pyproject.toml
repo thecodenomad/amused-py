@@ -72,24 +72,12 @@ Documentation = "https://github.com/nexon33/amused#readme"
 Repository = "https://github.com/nexon33/amused"
 Issues = "https://github.com/nexon33/amused/issues"
 
-[tool.setuptools]
-py-modules = [
-    "muse_data_parser",
-    "muse_discovery",
-    "muse_discovery_gui",
-    "muse_exact_client",
-    "muse_fnirs_processor",
-    "muse_integrated_parser",
-    "muse_ppg_heart_rate",
-    "muse_raw_stream",
-    "muse_realtime_decoder",
-    "muse_replay",
-    "muse_sleep_client",
-    "muse_sleep_parser",
-    "muse_stream_client",
-    "muse_visualizer",
-]
-include-package-data = true
+[tool.poetry]
+package-mode = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["amused*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.txt", "*.md"]

@@ -20,7 +20,7 @@ from typing import Optional, Dict, Any, List
 import time
 import os
 import numpy as np
-from muse_ppg_heart_rate import PPGHeartRateExtractor, PPGData
+from .muse_ppg_heart_rate import PPGHeartRateExtractor, PPGData
 
 # Service and Characteristic UUIDs
 MUSE_SERVICE_UUID = "0000fe8d-0000-1000-8000-00805f9b34fb"

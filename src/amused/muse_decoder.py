@@ -11,7 +11,7 @@ import datetime
 import logging
 
 # Import device configurations from centralized config module
-from muse_config import get_device_config
+from .muse_config import get_device_config
 from scipy.signal import find_peaks
 from scipy.ndimage import uniform_filter1d
 

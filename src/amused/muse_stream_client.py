@@ -16,8 +16,8 @@ from typing import Optional, Callable, Dict, Any, List
 import os
 import struct
 
-from muse_raw_stream import MuseRawStream
-from muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
+from .muse_raw_stream import MuseRawStream
+from .muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
 
 # Device configurations for different Muse generations
 class MuseDeviceConfig:

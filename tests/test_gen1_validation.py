@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from muse_realtime_decoder import MuseRealtimeDecoder
+from amused.muse_realtime_decoder import MuseRealtimeDecoder
 
 class TestGen1SensorValidation(unittest.TestCase):
     """Test Gen1 sensor validation and accuracy"""

@@ -55,7 +55,7 @@ class MuseRealtimeDecoder:
         self.detected_model = None
 
         # Import device configurations from centralized config module
-        from muse_config import get_device_config
+        from .muse_config import get_device_config
         self.get_device_config = get_device_config
 
         # Statistics (initialize before device configuration)

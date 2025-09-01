@@ -10,7 +10,7 @@ from typing import Optional, Callable, Dict, Any, List
 import os
 import logging
 
-from muse_decoder import MuseRealtimeDecoder, DecodedData
+from .muse_decoder import MuseRealtimeDecoder, DecodedData
 
 logger = logging.getLogger(__name__)
 

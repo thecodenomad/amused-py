@@ -10,8 +10,8 @@ import sys
 import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from muse_raw_stream import MuseRawStream, RawPacket
-from muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
+from amused.muse_raw_stream import MuseRawStream, RawPacket
+from amused.muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
 
 class TestCoreComponents(unittest.TestCase):
     """Test that core components can be imported and instantiated"""
