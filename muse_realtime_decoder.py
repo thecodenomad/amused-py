@@ -54,52 +54,9 @@ class MuseRealtimeDecoder:
         self.device_model = device_model
         self.detected_model = None
 
-        # Consolidated device configurations (matches muse_stream_client.py)
-        self.DEVICE_CONFIGS = {
-            'gen1': {
-                'name': 'Muse S Gen 1',
-                'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
-                'max_channels': 4,
-                'eeg_scale': 1000.0 / 2048.0,
-                'imu_scale': 1.0 / 100.0,
-                'ppg_scaling_factor': 1.0,
-                'ppg_baseline_offset': 0.0,
-                'hr_scaling_factor': 1.0,  # Reset to 1.0 for accurate readings
-                'hr_baseline_offset': 0.0,  # Reset to 0.0 for accurate readings
-                'quality_threshold': 0.05,
-                'peak_prominence': 0.2,
-                'ppg_range_min': 800,
-                'ppg_range_max': 65000,
-                'preferred_sampling_rate': 16.0,
-                'stabilization_time': 5.0
-            },
-            'gen3': {
-                'name': 'Muse S Gen 3 (Athena)',
-                'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L'],
-                'max_channels': 7,
-                'eeg_scale': 488.28125 / 2048.0,
-                'imu_scale': 2.0 / 32768.0,
-                'ppg_scaling_factor': 1.0,
-                'ppg_baseline_offset': 0.0,
-                'hr_scaling_factor': 1.0,
-                'hr_baseline_offset': 0.0,
-                'quality_threshold': 0.7,
-                'peak_prominence': 0.3,
-                'ppg_range_min': 5000,
-                'ppg_range_max': 30000,
-                'preferred_sampling_rate': 64.0,
-                'stabilization_time': 2.0
-            }
-        }
-
-        # Legacy aliases for backward compatibility
-        self.CHANNEL_CONFIGS = {k: {k2: v[k2] for k2 in ['eeg_channels', 'max_channels', 'eeg_scale', 'imu_scale']}
-                               for k, v in self.DEVICE_CONFIGS.items()}
-        self.CALIBRATION_TABLES = {k: {k2: v[k2] for k2 in ['ppg_scaling_factor', 'ppg_baseline_offset',
-                                                           'hr_scaling_factor', 'hr_baseline_offset',
-                                                           'quality_threshold', 'peak_prominence',
-                                                           'ppg_range_min', 'ppg_range_max']}
-                                  for k, v in self.DEVICE_CONFIGS.items()}
+        # Import device configurations from centralized config module
+        from muse_config import get_device_config
+        self.get_device_config = get_device_config
 
         # Statistics (initialize before device configuration)
         self.stats = {
@@ -162,14 +119,13 @@ class MuseRealtimeDecoder:
 
     def _configure_for_device(self, model: str):
         """Configure decoder for specific device model"""
-        if model in self.CHANNEL_CONFIGS:
-            config = self.CHANNEL_CONFIGS[model]
-            self.eeg_channels = config['eeg_channels']
-            self.max_channels = config['max_channels']
-            self.EEG_SCALE = config['eeg_scale']
-            self.IMU_SCALE = config['imu_scale']
-            self.detected_model = model
-            self.stats['detected_model'] = model
+        config = self.get_device_config(model)
+        self.eeg_channels = config['eeg_channels']
+        self.max_channels = config['max_channels']
+        self.EEG_SCALE = config['eeg_scale']
+        self.IMU_SCALE = config['imu_scale']
+        self.detected_model = model
+        self.stats['detected_model'] = model
 
     def _detect_device_model(self):
         """Detect device model (simplified - defaults to gen3)"""
@@ -240,7 +196,7 @@ class MuseRealtimeDecoder:
 
             # Combine metrics with device-specific weighting
             device_key = self.detected_model or 'gen3'
-            calibration = self.CALIBRATION_TABLES.get(device_key, self.CALIBRATION_TABLES['gen3'])
+            calibration = self.get_device_config(device_key)
 
             # Weight the metrics (SNR most important, then amplitude stability)
             snr_score = min(float(snr) / 2.0, 1.0)
@@ -551,7 +507,8 @@ class MuseRealtimeDecoder:
             return []
 
         samples = []
-        eeg_scale = self.DEVICE_CONFIGS.get(self.detected_model or 'gen3', self.DEVICE_CONFIGS['gen3'])['eeg_scale']
+        config = self.get_device_config(self.detected_model or 'gen3')
+        eeg_scale = config['eeg_scale']
 
         # Unpack 12 samples from 18 bytes
         for i in range(6):
@@ -577,9 +534,9 @@ class MuseRealtimeDecoder:
             return []
 
         # Get device configuration for efficient access
-        device_config = self.DEVICE_CONFIGS.get(self.detected_model or 'gen3', self.DEVICE_CONFIGS['gen3'])
+        device_config = self.get_device_config(self.detected_model or 'gen3')
         min_val, max_val = device_config['ppg_range_min'], device_config['ppg_range_max']
-        scale, offset = device_config['ppg_scaling_factor'], device_config['ppg_baseline_offset']
+        scale, offset = device_config['ppg_scale'], device_config['ppg_offset']
 
         samples = []
 
@@ -611,7 +568,7 @@ class MuseRealtimeDecoder:
         if len(data) < 18:
             return []
 
-        device_config = self.DEVICE_CONFIGS.get(self.detected_model or 'gen3', self.DEVICE_CONFIGS['gen3'])
+        device_config = self.get_device_config(self.detected_model or 'gen3')
         min_val, max_val = device_config['ppg_range_min'], device_config['ppg_range_max']
 
         samples = []
@@ -671,7 +628,7 @@ class MuseRealtimeDecoder:
 
         # Get device-specific calibration
         device_model = self.detected_model or 'gen3'
-        calibration = self.CALIBRATION_TABLES.get(device_model, self.CALIBRATION_TABLES['gen3'])
+        calibration = self.get_device_config(device_model)
 
         # Assess signal quality first
         quality_score = self._assess_signal_quality()
@@ -717,7 +674,7 @@ class MuseRealtimeDecoder:
                         signal = signal / (signal_std * 0.5 + signal_std * 0.5)
 
             # Get device-specific configuration
-            device_config = self.DEVICE_CONFIGS.get(self.detected_model or 'gen3', self.DEVICE_CONFIGS['gen3'])
+            device_config = self.get_device_config(self.detected_model or 'gen3')
             min_buffer_size = 32 if self.detected_model == 'gen1' else 64
 
             if len(self.ppg_buffer) < min_buffer_size:

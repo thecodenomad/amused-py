@@ -7,36 +7,35 @@ import unittest
 import datetime
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
-from muse_gen1_adapter import MuseGen1Adapter
+# Add the project root to the Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from muse_decoder import MuseRealtimeDecoder, DecodedData
 
 class TestGen1RealtimeDecoder(unittest.TestCase):
     """Test real-time packet decoding for Gen1 devices"""
 
     def setUp(self):
         """Set up test fixtures"""
-        self.decoder = MuseRealtimeDecoder()
-        self.gen1_adapter = MuseGen1Adapter()
+        self.decoder = MuseRealtimeDecoder('gen1')
 
     def test_gen1_eeg_packet_decoding(self):
-        """Test Gen1 EEG packet decoding with adapter"""
-        # Create a mock Gen1 EEG packet (different format from Gen3)
-        # Gen1 packets may have different structure
-        gen1_packet = bytes([0xDF, 0x00, 0x00, 0x00] + [0x80, 0x08] * 9)
+        """Test Gen1 EEG packet decoding"""
+        # Create a mock Gen1 EEG packet with proper EEG data
+        # EEG data should have values around 2048 (baseline) ± some variation
+        eeg_values = [2100, 1900, 2050, 2150, 2000, 2080]  # 6 samples * 2 bytes each = 12 bytes
+        eeg_bytes = b''.join(val.to_bytes(2, 'big') for val in eeg_values)
+        gen1_packet = bytes([0xDF, 0x00, 0x00, 0x00]) + eeg_bytes
 
-        # Test with Gen1 adapter
-        adapted = self.gen1_adapter.adapt_packet_parsing(gen1_packet)
         decoded = self.decoder.decode(gen1_packet)
 
         self.assertEqual(decoded.packet_type, 'EEG_PPG')
         self.assertIsNotNone(decoded.eeg)
-        # Gen1 should support TP9, AF7, AF8, TP10
-        expected_channels = ['TP9', 'AF7', 'AF8', 'TP10']
-        for channel in expected_channels:
-            if channel in decoded.eeg:
-                self.assertGreater(len(decoded.eeg[channel]), 0)
+        # Check that we got some EEG data
+        if decoded.eeg:
+            total_samples = sum(len(samples) for samples in decoded.eeg.values())
+            self.assertGreater(total_samples, 0)
 
     def test_gen1_quality_validation(self):
         """Test Gen1-specific quality validation"""
@@ -55,7 +54,7 @@ class TestGen1RealtimeDecoder(unittest.TestCase):
                 self.assertGreaterEqual(valid_ratio, 0.5, f"Channel {channel} should have >=50% valid samples")
 
     def test_gen1_adapter_integration(self):
-        """Test Gen1 adapter integration with decoder"""
+        """Test Gen1 decoder with various packet types"""
         test_packets = [
             bytes([0xDF, 0x00, 0x00, 0x00] + [0x80, 0x08] * 9),
             bytes([0xF4, 0x00, 0x00, 0x00] + [0x00, 0x64] * 6),
@@ -63,7 +62,6 @@ class TestGen1RealtimeDecoder(unittest.TestCase):
         ]
 
         for packet in test_packets:
-            adapted = self.gen1_adapter.adapt_packet_parsing(packet)
             decoded = self.decoder.decode(packet)
 
             # Should not crash and should produce valid results

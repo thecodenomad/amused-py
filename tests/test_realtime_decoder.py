@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from muse_realtime_decoder import MuseRealtimeDecoder, DecodedData
+from muse_decoder import MuseRealtimeDecoder, DecodedData
 
 class TestRealtimeDecoder(unittest.TestCase):
     """Test real-time packet decoding"""

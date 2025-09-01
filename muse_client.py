@@ -10,35 +10,7 @@ from typing import Optional, Callable, Dict, Any, List
 import os
 import logging
 
-# Import decoder with fallback
-try:
-    from muse_decoder import MuseRealtimeDecoder, DecodedData
-except ImportError:
-    # Fallback decoder stub
-    class DecodedData:
-        def __init__(self, timestamp, packet_type, eeg=None, ppg=None, imu=None, heart_rate=None):
-            self.timestamp = timestamp
-            self.packet_type = packet_type
-            self.eeg = eeg
-            self.ppg = ppg
-            self.imu = imu
-            self.heart_rate = heart_rate
-
-    class MuseRealtimeDecoder:
-        def __init__(self, device_model='auto'):
-            self.device_model = device_model
-
-        def register_callback(self, data_type, callback):
-            pass
-
-        def decode(self, data, timestamp):
-            return DecodedData(timestamp, 'UNKNOWN')
-
-        def get_stats(self):
-            return {}
-
-        def reset_stats(self):
-            pass
+from muse_decoder import MuseRealtimeDecoder, DecodedData
 
 logger = logging.getLogger(__name__)
 

@@ -10,56 +10,10 @@ from dataclasses import dataclass
 import datetime
 import logging
 
-# Device configurations (fallback if config module not available)
-DEVICE_CONFIGS = {
-    'gen1': {
-        'name': 'Muse S Gen 1',
-        'eeg_scale': 1000.0 / 2048.0,
-        'imu_scale': 1.0 / 100.0,
-        'ppg_scale': 1.0,
-        'ppg_offset': 0.0,
-        'hr_scale': 1.0,
-        'hr_offset': 0.0,
-        'quality_threshold': 0.05,
-        'peak_prominence': 0.2,
-        'ppg_range_min': 800,
-        'ppg_range_max': 65000,
-            'sampling_rate': 16.0,  # Reverted to 16.0 Hz as found more accurate
-        'stabilization_time': 5.0,
-        'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10'],
-        'max_channels': 4,
-    },
-    'gen3': {
-        'name': 'Muse S Gen 3',
-        'eeg_scale': 488.28125 / 2048.0,
-        'imu_scale': 2.0 / 32768.0,
-        'ppg_scale': 1.0,
-        'ppg_offset': 0.0,
-        'hr_scale': 1.0,
-        'hr_offset': 0.0,
-        'quality_threshold': 0.7,
-        'peak_prominence': 0.3,
-        'ppg_range_min': 5000,
-        'ppg_range_max': 30000,
-        'sampling_rate': 64.0,
-        'stabilization_time': 2.0,
-        'eeg_channels': ['TP9', 'AF7', 'AF8', 'TP10', 'FPz', 'AUX_R', 'AUX_L'],
-        'max_channels': 7,
-    }
-}
-
-def get_device_config(model: str) -> Dict[str, Any]:
-    """Get device configuration"""
-    return DEVICE_CONFIGS.get(model, DEVICE_CONFIGS['gen3'])
-
-try:
-    from scipy.signal import find_peaks
-    from scipy.ndimage import uniform_filter1d
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    uniform_filter1d = None
-    find_peaks = None
+# Import device configurations from centralized config module
+from muse_config import get_device_config
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +201,7 @@ class HeartRateProcessor:
 
     def _detect_peaks(self, signal: np.ndarray) -> np.ndarray:
         """Detect peaks in PPG signal with improved parameters for physiological data"""
-        if not SCIPY_AVAILABLE or len(signal) < 20:  # Reduced minimum for real-time
+        if len(signal) < 20:  # Reduced minimum for real-time
             return np.array([])
 
         try:
