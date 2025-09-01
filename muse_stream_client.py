@@ -400,9 +400,9 @@ class MuseStreamClient:
             if 'Gen 1' in self.device_config.get('name', '') and hasattr(sender, 'uuid'):
                 # Gen1: Use characteristic-specific decoding
                 char_uuid = str(sender.uuid)
-                print(f"🔧 Decoding Gen1 packet from {char_uuid[-4:]}: {data.hex()[:20]}...")
+                # print(f"🔧 Decoding Gen1 packet from {char_uuid[-4:]}: {data.hex()[:20]}...")
                 decoded = self.decoder.decode_raw_packet(bytes(data), char_uuid, timestamp)
-                print(f"🔧 Decoded: eeg={bool(decoded.eeg)}, ppg={bool(decoded.ppg)}, imu={bool(decoded.imu)}")
+                # print(f"🔧 Decoded: eeg={bool(decoded.eeg)}, ppg={bool(decoded.ppg)}, imu={bool(decoded.imu)}")
 
                 # Trigger user callbacks directly with decoded data
                 self._trigger_user_callbacks(decoded)

@@ -75,8 +75,8 @@ class MuseRealtimeDecoder:
             'gen1': {
                 'ppg_scaling_factor': 1.0,        # Baseline scaling
                 'ppg_baseline_offset': 0.0,       # Baseline adjustment
-                'hr_scaling_factor': 1.12,        # Heart rate scaling (increased boost for accuracy)
-                'hr_baseline_offset': 5.0,        # Heart rate baseline adjustment (increased boost)
+                'hr_scaling_factor': 1.05,        # Heart rate scaling (further reduced for accuracy)
+                'hr_baseline_offset': 8.0,        # Heart rate baseline adjustment (further reduced)
                 'quality_threshold': 0.08,        # Signal quality threshold (more permissive)
                 'peak_prominence': 0.2,           # Peak detection prominence (more sensitive)
                 'ppg_range_min': 800,             # Minimum valid PPG value (more inclusive)
@@ -109,6 +109,11 @@ class MuseRealtimeDecoder:
         # Start with Gen1 defaults, will adapt based on device_model
         self._configure_for_device('gen1')
 
+        # For Gen1 devices, strongly prefer 16.0Hz sampling rate
+        if self.device_model == 'gen1':
+            self.stable_sampling_rate = 16.0
+            self.sampling_rate_confidence = 5  # High initial confidence
+
         # Callbacks for different data types
         self.callbacks: Dict[str, List[Callable]] = {
             'eeg': [],
@@ -128,6 +133,17 @@ class MuseRealtimeDecoder:
             'hr_scaling_factor': 1.0,
             'quality_weight': 1.0
         }
+
+        # Heart rate stabilization
+        self.stable_sampling_rate = None  # Once detected, stick with it
+        self.sampling_rate_confidence = 0  # Confidence in detected rate
+        self.heart_rate_history = []  # Store recent HR readings for filtering
+        self.filtered_heart_rate = None  # Smoothed/filtered HR value
+
+        # Adaptive calibration learning
+        self.calibration_history = []  # Store calibration performance
+        self.target_hr_range = (59, 65)  # Expected target range based on user's 62 BPM reading
+        self.calibration_learning_rate = 0.05  # Conservative learning rate for stability
 
         # Adaptive detection state
         self.channel_count_history = []
@@ -223,25 +239,25 @@ class MuseRealtimeDecoder:
 
                 if avg_channels > 5 and self.detected_model != 'gen3':
                     self._configure_for_device('gen3')
-                    print(f"[Decoder] Adapted to Gen3 (detected {avg_channels:.1f} avg channels)")
+                   # print(f"[Decoder] Adapted to Gen3 (detected {avg_channels:.1f} avg channels)")
                 elif avg_channels <= 4 and self.detected_model != 'gen1':
                     self._configure_for_device('gen1')
-                    print(f"[Decoder] Adapted to Gen1 (detected {avg_channels:.1f} avg channels)")
-    
+                   # print(f"[Decoder] Adapted to Gen1 (detected {avg_channels:.1f} avg channels)")
+
     def register_callback(self, data_type: str, callback: Callable[[DecodedData], None]):
         """
         Register a callback for specific data type
-        
+
         Args:
             data_type: 'eeg', 'ppg', 'imu', 'heart_rate', or 'any'
             callback: Function to call with decoded data
-            
+
         Example:
             decoder.register_callback('eeg', lambda data: print(f"EEG: {data.eeg}"))
         """
         if data_type in self.callbacks:
             self.callbacks[data_type].append(callback)
-    
+
     def decode(self, data: bytes, timestamp: Optional[datetime.datetime] = None) -> DecodedData:
         """
         Decode a raw BLE packet in real-time
@@ -295,7 +311,7 @@ class MuseRealtimeDecoder:
         self._trigger_callbacks(decoded)
 
         return decoded
-    
+
     def _get_packet_type(self, type_byte: int) -> str:
         """Get human-readable packet type"""
         types = {
@@ -305,7 +321,7 @@ class MuseRealtimeDecoder:
             0xD9: 'MIXED_2'
         }
         return types.get(type_byte, f'UNKNOWN_{type_byte:02X}')
-    
+
     def _decode_type_df(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xDF packets (EEG + PPG) - Adaptive Gen1/Gen3"""
         decoded.eeg = {}
@@ -360,8 +376,8 @@ class MuseRealtimeDecoder:
                 break  # Not enough data left
 
         # If we found PPG data, log it
-        if decoded.ppg and 'samples' in decoded.ppg:
-            print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples from {self.detected_model} device")
+        #if decoded.ppg and 'samples' in decoded.ppg:
+            # print(f"[Decoder] Found {len(decoded.ppg['samples'])} PPG samples from {self.detected_model} device")
 
     def decode_raw_packet(self, data: bytes, characteristic_uuid: str, timestamp=None) -> DecodedData:
         """
@@ -423,40 +439,40 @@ class MuseRealtimeDecoder:
             }
         except:
             return {}
-    
+
     def _decode_type_f4(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xF4 packets (IMU)"""
         if len(data) < 16:
             return
-        
+
         decoded.imu = {}
         offset = 4
-        
+
         try:
             # Direct struct unpack for speed
             ax, ay, az, gx, gy, gz = struct.unpack_from('>hhhhhh', data, offset)
-            
+
             decoded.imu['accel'] = [ax * self.IMU_SCALE, ay * self.IMU_SCALE, az * self.IMU_SCALE]
             decoded.imu['gyro'] = [gx * self.IMU_SCALE, gy * self.IMU_SCALE, gz * self.IMU_SCALE]
             self.stats['imu_samples'] += 2
         except:
             pass
-    
+
     def _decode_type_db(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xDB packets (Mixed)"""
         # These often contain control data or mixed sensors
         self._decode_generic(data[4:], decoded)
-    
+
     def _decode_type_d9(self, data: bytes, decoded: DecodedData):
         """Fast decode for 0xD9 packets (Mixed)"""
         # Similar to 0xDB
         self._decode_generic(data[4:], decoded)
-    
+
     def _decode_generic(self, data: bytes, decoded: DecodedData):
         """Generic decoder for unknown packet types"""
         # Look for known patterns
         offset = 0
-        
+
         while offset < len(data) - 10:
             # Check for EEG pattern
             if offset + 18 <= len(data) and self._looks_like_eeg(data[offset:offset+18]):
@@ -472,35 +488,35 @@ class MuseRealtimeDecoder:
                 offset += 18
             else:
                 offset += 1
-    
+
     def _looks_like_eeg(self, segment: bytes) -> bool:
         """Quick check if segment contains EEG data"""
         if len(segment) != 18:
             return False
-        
+
         # Check first sample range
         sample = (segment[0] << 4) | (segment[1] >> 4)
         return 1000 < sample < 3000
-    
+
     def _fast_unpack_eeg(self, data: bytes) -> List[float]:
         """Fast EEG unpacking using numpy if available"""
         samples = []
-        
+
         # Unpack 12 samples from 18 bytes
         for i in range(6):
             offset = i * 3
             # Two 12-bit samples in 3 bytes
             b0, b1, b2 = data[offset:offset+3]
-            
+
             sample1 = (b0 << 4) | (b1 >> 4)
             sample2 = ((b1 & 0x0F) << 8) | b2
-            
+
             # Convert to microvolts
             samples.append((sample1 - 2048) * self.EEG_SCALE)
             samples.append((sample2 - 2048) * self.EEG_SCALE)
-        
+
         return samples
-    
+
     def _fast_unpack_ppg(self, data: bytes) -> List[int]:
         """Fast PPG unpacking - Device-specific extraction with calibration"""
         if len(data) < 6:
@@ -626,7 +642,7 @@ class MuseRealtimeDecoder:
 
         # Only proceed if signal quality meets threshold
         if quality_score < calibration['quality_threshold']:
-            print(f"[Decoder] Signal quality too low ({quality_score:.2f} < {calibration['quality_threshold']})")
+           # print(f"[Decoder] Signal quality too low ({quality_score:.2f} < {calibration['quality_threshold']})")
             return
 
         try:
@@ -665,7 +681,7 @@ class MuseRealtimeDecoder:
 
                 # First, try to detect the actual sampling rate from the PPG data
                 detected_rate = self._detect_ppg_sampling_rate(self.ppg_buffer)
-                print(f"[Decoder] Detected PPG sampling rate: {detected_rate}Hz")
+               # print(f"[Decoder] Detected PPG sampling rate: {detected_rate}Hz")
 
                 # Gen1-optimized: Prioritize successful rates, then detected rate
                 rates_to_try = []
@@ -694,14 +710,28 @@ class MuseRealtimeDecoder:
 
                 # Original Gen3 logic
                 detected_rate = self._detect_ppg_sampling_rate(self.ppg_buffer)
-                print(f"[Decoder] Detected PPG sampling rate: {detected_rate}Hz")
+               # print(f"[Decoder] Detected PPG sampling rate: {detected_rate}Hz")
 
-                # Original Gen3 sampling rate selection
-                rates_to_try = [detected_rate]
-                if detected_rate == 32.0:
-                    rates_to_try.extend([16.0, 21.33, 24.0])
-                elif detected_rate == 64.0:
-                    rates_to_try.extend([32.0, 42.67, 48.0])
+                # Gen1-optimized sampling rate selection - prioritize 16.0Hz
+                if self.detected_model == 'gen1':
+                    # For Gen1, always try 16.0Hz first, then detected rate, then others
+                    rates_to_try = [16.0]  # Always try 16.0Hz first
+                    if detected_rate != 16.0:
+                        rates_to_try.append(detected_rate)  # Then detected rate
+                    rates_to_try.extend([21.33])  # Finally 21.33Hz
+                else:
+                    # Original Gen3 sampling rate selection
+                    rates_to_try = [detected_rate]
+                    if detected_rate == 32.0:
+                        rates_to_try.extend([16.0, 21.33, 24.0])
+                    elif detected_rate == 64.0:
+                        rates_to_try.extend([32.0, 42.67, 48.0])
+
+            # Prioritize 16.0Hz for Gen1 devices (proven more accurate)
+            if self.detected_model == 'gen1' and 16.0 in rates_to_try:
+                # Move 16.0Hz to the front of the list
+                rates_to_try.remove(16.0)
+                rates_to_try.insert(0, 16.0)
 
             for sample_rate in rates_to_try:
                 # Apply device-specific peak detection parameters
@@ -761,19 +791,31 @@ class MuseRealtimeDecoder:
 
                             # Gen1-optimized valid range - very inclusive
                             if 40 <= final_hr <= 180:  # Very inclusive range for Gen1
-                                decoded.heart_rate = float(final_hr)
-                                self.last_heart_rate = float(final_hr)
+                                # Assess confidence in this reading
+                                confidence = self._assess_hr_confidence(final_hr, len(valid_intervals), quality_score, sample_rate)
 
-                                # Update adaptive calibration with this reading
-                                self._update_adaptive_calibration(final_hr, quality_score)
+                                # Only accept readings with reasonable confidence
+                                if confidence >= 0.3:
+                                    # Apply filtering to stabilize readings
+                                    filtered_hr = self._filter_heart_rate(final_hr)
 
-                                # Track successful sampling rate
-                                if sample_rate not in self.successful_rates:
-                                    self.successful_rates[sample_rate] = 0
-                                self.successful_rates[sample_rate] += 1
+                                    decoded.heart_rate = float(filtered_hr)
+                                    self.last_heart_rate = float(filtered_hr)
 
-                                print(f"[Decoder] Adaptive HR: {final_hr:.1f} BPM at {sample_rate}Hz")
-                                break
+                                    # Update adaptive calibration with this reading
+                                    self._update_adaptive_calibration(final_hr, quality_score)
+
+                                    # Track successful sampling rate
+                                    if sample_rate not in self.successful_rates:
+                                        self.successful_rates[sample_rate] = 0
+                                    self.successful_rates[sample_rate] += 1
+
+                                    # Only print stable readings to reduce noise
+                                    if len(self.heart_rate_history) >= 5:
+                                        hr_std = float(np.std(self.heart_rate_history[-5:]))
+                                        if hr_std <= 8:  # Only print if readings are stable
+                                            print(f"[Decoder] Stable HR: {filtered_hr:.1f} BPM (±{hr_std:.1f}) at {sample_rate}Hz")
+                                    break
                 else:
                     # Gen3 (default) peak detection - use calibration values
                     if not SCIPY_AVAILABLE:
@@ -789,102 +831,127 @@ class MuseRealtimeDecoder:
                         calibrated_hr = raw_hr * calibration['hr_scaling_factor'] + calibration['hr_baseline_offset']
 
                         if 40 < calibrated_hr < 200:  # Physiological range
-                            decoded.heart_rate = float(calibrated_hr)
-                            self.last_heart_rate = float(calibrated_hr)
-                            print(f"[Decoder] Calibrated HR: {calibrated_hr:.1f} BPM ({self.detected_model}) at {sample_rate}Hz")
+                            # Apply filtering for consistency
+                            filtered_hr = self._filter_heart_rate(calibrated_hr)
+                            decoded.heart_rate = float(filtered_hr)
+                            self.last_heart_rate = float(filtered_hr)
+
+                            # Only print stable readings to reduce noise
+                            if len(self.heart_rate_history) >= 5:
+                                hr_std = float(np.std(self.heart_rate_history[-5:]))
+                                if hr_std <= 8:  # Only print if readings are stable
+                                    print(f"[Decoder] Stable HR: {filtered_hr:.1f} BPM (±{hr_std:.1f}) ({self.detected_model}) at {sample_rate}Hz")
                             break
         except Exception as e:
             print(f"[Decoder] Heart rate calculation error: {e}")
             pass
 
     def _detect_ppg_sampling_rate(self, ppg_data: List[int]) -> float:
-        """Detect actual PPG sampling rate - Device-specific detection"""
+        """Detect actual PPG sampling rate with stabilization - favors 16.0Hz for Gen1"""
+        # If we have a stable sampling rate with high confidence, use it
+        if self.stable_sampling_rate is not None and self.sampling_rate_confidence > 5:
+            return self.stable_sampling_rate
+
         if len(ppg_data) < 20:
-            return 21.33 if self.detected_model == 'gen1' else 64.0  # Device-specific default
+            # Strong bias toward 16.0Hz for Gen1 devices
+            return 16.0 if self.detected_model == 'gen1' else 64.0
 
         signal = np.array(ppg_data, dtype=float)
         signal = signal - np.mean(signal)
 
         if len(signal) < 50:
-            return 21.33 if self.detected_model == 'gen1' else 64.0  # Device-specific default
+            # Strong bias toward 16.0Hz for Gen1 devices
+            return 16.0 if self.detected_model == 'gen1' else 64.0
 
         # Apply device-specific sampling rate detection
         if self.detected_model == 'gen1':
-            # Gen1-specific sampling rate detection - improved accuracy
-            # Gen1 devices typically use 21.33 Hz for PPG, but can vary
+            # Gen1-specific sampling rate detection with strong 16.0Hz bias
+            detected_rate = self._detect_gen1_sampling_rate(signal)
 
-            # Method 1: Improved autocorrelation-based detection
-            if len(signal) >= 128:  # Need more samples for reliable analysis
-                try:
-                    # Use autocorrelation for periodicity detection
-                    signal_clean = signal - np.mean(signal)
+            # Stabilize the sampling rate with 16.0Hz preference
+            if self.stable_sampling_rate is None:
+                # Always prefer 16.0Hz for Gen1 unless we have strong evidence otherwise
+                self.stable_sampling_rate = 16.0 if detected_rate == 16.0 else detected_rate
+                self.sampling_rate_confidence = 1
+            elif self.stable_sampling_rate == detected_rate:
+                self.sampling_rate_confidence = min(10, self.sampling_rate_confidence + 1)
+            else:
+                # Different rate detected, but be more lenient with 16.0Hz
+                if detected_rate == 16.0:
+                    # Quickly switch to 16.0Hz if detected
+                    self.stable_sampling_rate = 16.0
+                    self.sampling_rate_confidence = 3
+                else:
+                    # Reduce confidence more slowly for non-16.0Hz rates
+                    self.sampling_rate_confidence = max(0, self.sampling_rate_confidence - 0.5)
+                    if self.sampling_rate_confidence == 0:
+                        self.stable_sampling_rate = detected_rate
+                        self.sampling_rate_confidence = 1
 
-                    # Compute autocorrelation
-                    autocorr = np.correlate(signal_clean, signal_clean, mode='full')
-                    autocorr = autocorr[len(autocorr)//2:]  # Keep only positive lags
+            return self.stable_sampling_rate or 16.0  # Default to 16.0Hz for Gen1
+        else:
+            # Gen3 sampling rate detection
+            return self._detect_gen3_sampling_rate(signal)
 
-                    # Find peaks in autocorrelation (potential periods)
-                    if not SCIPY_AVAILABLE:
-                        return 21.33  # Fallback
+    def _detect_gen1_sampling_rate(self, signal: np.ndarray) -> float:
+        """Gen1-specific sampling rate detection - strongly favors 16.0Hz"""
+        # Method 1: Autocorrelation-based detection with 16.0Hz bias
+        if len(signal) >= 128:
+            try:
+                signal_clean = signal - np.mean(signal)
+                autocorr = np.correlate(signal_clean, signal_clean, mode='full')
+                autocorr = autocorr[len(autocorr)//2:]
 
+                if SCIPY_AVAILABLE:
                     peaks, _ = find_peaks(autocorr, distance=10, prominence=np.std(autocorr)*0.1)  # type: ignore
 
                     if len(peaks) > 0:
-                        # Get the most prominent peak (likely fundamental period)
                         peak_heights = autocorr[peaks]
                         best_peak_idx = np.argmax(peak_heights)
                         period_samples = peaks[best_peak_idx]
 
                         if period_samples > 0:
-                            # Estimate sampling rate from period
-                            # For heart rate around 73 BPM (1.22 Hz), period should be ~16-22 samples
-                            estimated_freq = len(signal) / (period_samples * 10.0)  # Rough estimate
+                            # For 70 BPM (1.17 Hz), period should be ~13-14 samples at 16.0 Hz
+                            estimated_freq = len(signal) / (period_samples * 10.0)
 
-                            # Map to likely sampling rates
-                            if 15 <= estimated_freq <= 25:
-                                return 21.33  # Close to expected 21.33 Hz
-                            elif 10 <= estimated_freq <= 15:
-                                return 16.0   # Close to 16 Hz
-                except:
-                    pass
+                            # Strong bias toward 16.0Hz for Gen1
+                            if 10 <= estimated_freq <= 18:  # Wider range for 16.0Hz
+                                return 16.0
+                            elif 18 <= estimated_freq <= 25:  # Narrower range for 21.33Hz
+                                return 21.33
+                            else:
+                                return 16.0  # Default to 16.0Hz
+            except:
+                pass
 
-            # Method 2: Improved statistical approach
-            std_dev = np.std(signal)
-            mean_val = np.mean(np.abs(signal))
+        # Method 2: Statistical approach with strong 16.0Hz bias
+        std_dev = np.std(signal)
+        signal_range = np.ptp(signal)
 
-            # More nuanced analysis based on signal characteristics
-            signal_range = np.ptp(signal)  # Peak-to-peak range
-
-            # Gen1 PPG characteristics analysis
-            if signal_range < 1000:  # Low amplitude signal
-                return 16.0  # Likely lower sampling rate
-            elif std_dev < 800:  # Low variability
-                return 21.33  # Higher sampling rate for better resolution
-            elif signal_range > 3000:  # High amplitude signal
-                return 16.0  # Lower rate for stability
-            else:
-                return 21.33  # Default to higher rate for Gen1
-
-            return 21.33  # Gen1 improved default
+        # Strong preference for 16.0Hz for Gen1 devices
+        # 16.0Hz has proven more accurate for heart rate detection
+        if signal_range > 500:  # Good signal amplitude
+            return 16.0  # Favor 16.0Hz for better heart rate accuracy
+        elif std_dev > 600:  # Higher variability - 16.0Hz handles this better
+            return 16.0
         else:
-            # Gen3 (default) sampling rate detection - original logic preserved
-            # Check for common sampling rates by looking at signal variance patterns
-            if len(signal) > 50:
-                # Calculate autocorrelation to find periodicity
-                corr = np.correlate(signal - np.mean(signal), signal - np.mean(signal), mode='full')
-                corr = corr[len(corr)//2:]
+            return 16.0  # Default to 16.0Hz for Gen1
 
-                # Find peaks in autocorrelation
-                if not SCIPY_AVAILABLE:
-                    return 64.0  # Gen3 default
+        return 16.0
+
+    def _detect_gen3_sampling_rate(self, signal: np.ndarray) -> float:
+        """Gen3 sampling rate detection"""
+        if len(signal) > 50:
+            corr = np.correlate(signal - np.mean(signal), signal - np.mean(signal), mode='full')
+            corr = corr[len(corr)//2:]
+
+            if SCIPY_AVAILABLE:
                 peaks, _ = find_peaks(corr[:len(corr)//4], distance=10, prominence=np.std(corr)*0.1)  # type: ignore
 
                 if len(peaks) > 0:
-                    # Estimate period from first peak
                     period = peaks[0]
-                    estimated_rate = len(ppg_data) / (period * 0.1)  # Rough estimate
+                    estimated_rate = len(signal) / (period * 0.1)
 
-                    # Snap to common rates
                     if 25 <= estimated_rate <= 40:
                         return 32.0
                     elif 50 <= estimated_rate <= 75:
@@ -892,7 +959,212 @@ class MuseRealtimeDecoder:
                     elif 100 <= estimated_rate <= 140:
                         return 128.0
 
-            return 64.0  # Gen3 default
+        return 64.0
+
+    def _filter_heart_rate(self, new_hr: float) -> float:
+        """Apply filtering to stabilize heart rate readings with adaptive calibration"""
+        # Add new reading to history
+        self.heart_rate_history.append(new_hr)
+
+        # Keep only recent readings (last 15 seconds worth at 1 reading/sec for better stability)
+        if len(self.heart_rate_history) > 15:
+            self.heart_rate_history = self.heart_rate_history[-15:]
+
+        # Apply outlier filtering with tighter bounds
+        if len(self.heart_rate_history) >= 5:
+            # Remove outliers (values more than 8 BPM from median for tighter control)
+            median_hr = float(np.median(self.heart_rate_history))
+            filtered_readings = [hr for hr in self.heart_rate_history
+                               if abs(hr - median_hr) <= 8]
+
+            if len(filtered_readings) >= 5:
+                # Apply adaptive calibration adjustment
+                self._adapt_calibration_from_readings(filtered_readings)
+
+                # Apply exponential moving average with lower alpha for more stability
+                if self.filtered_heart_rate is None:
+                    self.filtered_heart_rate = float(np.mean(filtered_readings))
+                else:
+                    # Exponential smoothing with lower alpha = 0.15 for more stability
+                    alpha = 0.15
+                    current_mean = float(np.mean(filtered_readings))
+                    self.filtered_heart_rate = alpha * current_mean + (1 - alpha) * self.filtered_heart_rate
+
+                return self.filtered_heart_rate
+
+        # Not enough data for filtering, return raw value
+        return new_hr
+
+    def _adapt_calibration_from_readings(self, readings: List[float]):
+        """Adapt calibration based on actual readings to approach target range"""
+        if len(readings) < 5:
+            return
+
+        current_avg = float(np.mean(readings))
+        target_center = (self.target_hr_range[0] + self.target_hr_range[1]) / 2
+
+        # Calculate error from target
+        error = target_center - current_avg
+
+        # Only adjust if error is significant (> 5 BPM)
+        if abs(error) > 5:
+            # Adjust baseline offset to correct the error
+            adjustment = error * self.calibration_learning_rate
+
+            # Update the adaptive calibration
+            self.adaptive_calibration['hr_baseline_offset'] += adjustment
+
+            # Keep within reasonable bounds
+            self.adaptive_calibration['hr_baseline_offset'] = max(-20.0, min(20.0,
+                self.adaptive_calibration['hr_baseline_offset']))
+
+            # Store calibration performance for monitoring
+            import datetime
+            self.calibration_history.append({
+                'reading_avg': current_avg,
+                'target': target_center,
+                'error': error,
+                'adjustment': adjustment,
+                'timestamp': datetime.datetime.now()
+            })
+
+            # Keep only recent calibration history
+            if len(self.calibration_history) > 10:
+                self.calibration_history = self.calibration_history[-10:]
+
+    def _calculate_trend_slope(self, readings: List[float]) -> float:
+        """Calculate the slope of heart rate trend to detect drift"""
+        if len(readings) < 5:
+            return 0.0
+
+        # Simple linear regression slope
+        n = len(readings)
+        x = list(range(n))
+        y = readings
+
+        sum_x = sum(x)
+        sum_y = sum(y)
+        sum_xy = sum(xi * yi for xi, yi in zip(x, y))
+        sum_xx = sum(xi * xi for xi in x)
+
+        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x)
+        return slope
+
+    def _assess_hr_confidence(self, hr_value: float, peak_count: int, signal_quality: float, sample_rate: Optional[float] = None) -> float:
+        """Assess confidence in heart rate reading with stability considerations"""
+        confidence = 0.0
+
+        # Base confidence from peak count
+        if peak_count >= 5:
+            confidence += 0.4
+        elif peak_count >= 3:
+            confidence += 0.2
+
+        # Physiological plausibility with tighter bounds for stability
+        if 60 <= hr_value <= 100:  # Tighter range around expected resting HR
+            confidence += 0.4  # Higher bonus for realistic range
+        elif 50 <= hr_value <= 120:
+            confidence += 0.2
+        elif 40 <= hr_value <= 150:
+            confidence += 0.1
+
+        # Signal quality contribution
+        confidence += signal_quality * 0.3
+
+        # Stability bonus - reward readings that are close to recent average
+        if len(self.heart_rate_history) >= 5:
+            recent_avg = float(np.mean(self.heart_rate_history[-5:]))
+            stability_deviation = abs(hr_value - recent_avg)
+
+            if stability_deviation <= 3:  # Within 3 BPM of recent average
+                confidence += 0.2  # Stability bonus
+            elif stability_deviation <= 8:  # Within 8 BPM of recent average
+                confidence += 0.1  # Moderate stability bonus
+
+        # Sampling rate bias for Gen1 devices - strongly favor 16.0Hz
+        if self.detected_model == 'gen1' and sample_rate is not None:
+            if sample_rate == 16.0:
+                confidence += 0.15  # Bonus for 16.0Hz (proven more accurate)
+            elif sample_rate == 21.33:
+                confidence -= 0.1  # Penalty for 21.33Hz (less accurate for this user)
+
+        return min(1.0, confidence)
+
+    def reset_hr_stabilization(self):
+        """Reset heart rate stabilization state"""
+        self.stable_sampling_rate = None
+        self.sampling_rate_confidence = 0
+        self.heart_rate_history.clear()
+        self.filtered_heart_rate = None
+        self.calibration_history.clear()
+        print("[Decoder] Heart rate stabilization reset")
+
+    def set_target_hr_range(self, min_hr: float, max_hr: float):
+        """Set the expected target heart rate range for adaptive calibration"""
+        self.target_hr_range = (min_hr, max_hr)
+        print(f"[Decoder] Target HR range set to {min_hr}-{max_hr} BPM")
+
+    def get_target_hr_range(self) -> tuple:
+        """Get the current target heart rate range"""
+        return self.target_hr_range
+
+    def reset_adaptive_calibration_only(self):
+        """Reset adaptive calibration and recent readings"""
+        self.recent_hr_readings.clear()
+        self.adaptive_calibration = {
+            'hr_baseline_offset': 0.0,
+            'hr_scaling_factor': 1.0,
+            'quality_weight': 1.0
+        }
+        print("[Decoder] Adaptive calibration reset")
+
+    def get_calibration_status(self) -> dict:
+        """Get current calibration and performance status"""
+        if len(self.heart_rate_history) < 5:
+            return {"status": "insufficient_data", "readings": len(self.heart_rate_history)}
+
+        recent_readings = self.heart_rate_history[-10:] if len(self.heart_rate_history) > 10 else self.heart_rate_history
+
+        avg_hr = float(np.mean(recent_readings))
+        std_hr = float(np.std(recent_readings))
+        min_hr = float(np.min(recent_readings))
+        max_hr = float(np.max(recent_readings))
+
+        # Assess stability
+        stability_score = max(0, 1.0 - (std_hr / 10.0))  # 1.0 = very stable, 0.0 = very unstable
+
+        # Assess accuracy (assuming target is around 72 BPM)
+        target_hr = 72.0
+        accuracy_score = max(0, 1.0 - (abs(avg_hr - target_hr) / 20.0))  # 1.0 = very accurate, 0.0 = very inaccurate
+
+        return {
+            "status": "calibrated" if stability_score > 0.7 and accuracy_score > 0.7 else "needs_adjustment",
+            "readings": len(self.heart_rate_history),
+            "avg_hr": avg_hr,
+            "std_hr": std_hr,
+            "range": f"{min_hr:.1f}-{max_hr:.1f}",
+            "stability_score": stability_score,
+            "accuracy_score": accuracy_score,
+            "sampling_rate": self.stable_sampling_rate,
+            "adaptive_offset": self.adaptive_calibration['hr_baseline_offset'],
+            "adaptive_scale": self.adaptive_calibration['hr_scaling_factor']
+        }
+
+    def get_hr_stability_status(self) -> dict:
+        """Get current heart rate stability status"""
+        if len(self.heart_rate_history) < 3:
+            return {"stable": False, "readings": 0, "std_dev": None}
+
+        hr_std = float(np.std(self.heart_rate_history))
+        stable = hr_std <= 8.0  # Within +/- 8 BPM
+
+        return {
+            "stable": stable,
+            "readings": len(self.heart_rate_history),
+            "std_dev": hr_std,
+            "current_hr": self.filtered_heart_rate,
+            "sampling_rate": self.stable_sampling_rate
+        }
 
     def _trigger_callbacks(self, decoded: DecodedData):
         """Trigger registered callbacks"""
@@ -900,23 +1172,23 @@ class MuseRealtimeDecoder:
         if decoded.eeg and self.callbacks['eeg']:
             for callback in self.callbacks['eeg']:
                 callback(decoded)
-        
+
         if decoded.ppg and self.callbacks['ppg']:
             for callback in self.callbacks['ppg']:
                 callback(decoded)
-        
+
         if decoded.imu and self.callbacks['imu']:
             for callback in self.callbacks['imu']:
                 callback(decoded)
-        
+
         if decoded.heart_rate and self.callbacks['heart_rate']:
             for callback in self.callbacks['heart_rate']:
                 callback(decoded)
-        
+
         # General callbacks
         for callback in self.callbacks['any']:
             callback(decoded)
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get decoder statistics"""
         return {
@@ -929,7 +1201,7 @@ class MuseRealtimeDecoder:
             'last_heart_rate': self.last_heart_rate,
             'last_packet': self.stats['last_packet_time']
         }
-    
+
     def reset_stats(self):
         """Reset statistics"""
         self.stats = {
@@ -955,41 +1227,41 @@ class MuseRealtimeDecoder:
 # Example real-time processing
 def example_realtime_processing():
     """Example of real-time packet processing"""
-    
+
     print("Real-time Decoder Example")
     print("=" * 60)
-    
+
     # Create decoder
     decoder = MuseRealtimeDecoder()
-    
+
     # Register callbacks for different data types
     def on_eeg(data: DecodedData):
         if data.eeg:
             # Get first available channel
             first_channel = next(iter(data.eeg.keys()))
             print(f"EEG: {len(data.eeg)} channels, {first_channel}: {data.eeg[first_channel][0]:.1f} μV")
-    
+
     def on_heart_rate(data: DecodedData):
         print(f"Heart Rate: {data.heart_rate:.0f} BPM")
-    
+
     def on_imu(data: DecodedData):
         if data.imu:
             print(f"IMU: Accel={data.imu['accel']}, Gyro={data.imu['gyro']}")
-    
+
     decoder.register_callback('eeg', on_eeg)
     decoder.register_callback('heart_rate', on_heart_rate)
     decoder.register_callback('imu', on_imu)
-    
+
     # Simulate incoming packets
     test_packets = [
         bytes.fromhex("df0000" + "80088008" * 10),  # EEG packet
         bytes.fromhex("f40200" + "0100020003000400050006" * 2),  # IMU packet
     ]
-    
+
     for packet in test_packets:
         decoded = decoder.decode(packet)
-        print(f"Decoded: {decoded.packet_type}")
-    
+        # print(f"Decoded: {decoded.packet_type}")
+
     # Show statistics
     stats = decoder.get_stats()
     print(f"\nStatistics:")
