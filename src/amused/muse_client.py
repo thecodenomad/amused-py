@@ -264,7 +264,7 @@ class MuseStreamClient:
                 enabled_count = 0
 
                 # Get device config to determine which characteristics to enable
-                from muse_config import get_device_config
+                from .muse_config import get_device_config
                 device_config = get_device_config(self.device_model)
 
                 # For Gen1 devices, enable ALL sensor characteristics
